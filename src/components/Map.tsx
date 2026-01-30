@@ -11,6 +11,34 @@ import "mapbox-gl/dist/mapbox-gl.css";
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
+// Vibrant selected route color (cyan/teal)
+const SELECTED_COLOR: [number, number, number, number] = [0, 255, 220, 255];
+const SELECTED_GLOW_COLOR: [number, number, number] = [0, 255, 220];
+
+// Heartbeat animation curve - sharp spikes followed by rest
+function heartbeatCurve(t: number): number {
+  // t is 0-1, representing one full heartbeat cycle
+  // Creates a double-beat pattern like a real heartbeat (lub-dub)
+
+  if (t < 0.1) {
+    // First beat (lub) - sharp spike up
+    const progress = t / 0.1;
+    return Math.sin(progress * Math.PI) * 1.0;
+  } else if (t < 0.15) {
+    // Quick dip
+    const progress = (t - 0.1) / 0.05;
+    return -0.2 * Math.sin(progress * Math.PI);
+  } else if (t < 0.25) {
+    // Second beat (dub) - smaller spike
+    const progress = (t - 0.15) / 0.1;
+    return Math.sin(progress * Math.PI) * 0.6;
+  } else {
+    // Rest period - flat baseline with subtle decay
+    const progress = (t - 0.25) / 0.75;
+    return Math.max(0, 0.1 * (1 - progress));
+  }
+}
+
 // NYC centered view
 const INITIAL_VIEW_STATE: ViewState = {
   longitude: -73.985,
@@ -55,6 +83,30 @@ export default function Map({
   const [viewState, setViewState] = useState<ViewState>(INITIAL_VIEW_STATE);
   const [hoveredWalkId, setHoveredWalkId] = useState<string | null>(null);
   const [isClientReady, setIsClientReady] = useState(false);
+  const [animationTime, setAnimationTime] = useState(0);
+  const animationRef = useRef<number | null>(null);
+
+  // Heartbeat animation for selected route
+  useEffect(() => {
+    if (selectedWalk) {
+      let lastTime = performance.now();
+      const animate = (currentTime: number) => {
+        const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
+        lastTime = currentTime;
+        // One full heartbeat cycle every ~1.2 seconds (50 BPM - calm heartbeat)
+        setAnimationTime((t) => (t + deltaTime / 1.2) % 1);
+        animationRef.current = requestAnimationFrame(animate);
+      };
+      animationRef.current = requestAnimationFrame(animate);
+      return () => {
+        if (animationRef.current) {
+          cancelAnimationFrame(animationRef.current);
+        }
+      };
+    } else {
+      setAnimationTime(0);
+    }
+  }, [selectedWalk]);
 
   // Ensure we're fully mounted on client before initializing WebGL
   useEffect(() => {
@@ -75,18 +127,106 @@ export default function Map({
       });
   }, []);
 
-  // Create the path layer
+  // Calculate heartbeat pulse values for animation
+  const heartbeat = heartbeatCurve(animationTime);
+  // Opacity pulses with heartbeat - baseline 0.4, peaks at 1.0
+  const pulseOpacity = 0.4 + heartbeat * 0.6;
+  // Width pulses with heartbeat - baseline 8, peaks at 18
+  const pulseWidth = 8 + heartbeat * 10;
+  // Glow intensity for outer layers
+  const glowIntensity = 30 + heartbeat * 40;
+
+  // Create the path layers with glow and pulse effects
   const layers = useMemo(
     () => [
+      // Outer glow layer for selected route (widest, pulses with heartbeat)
+      ...(selectedWalk
+        ? [
+            new PathLayer<Walk>({
+              id: "selected-glow-outer",
+              data: [selectedWalk],
+              getPath: (d) => d.coordinates,
+              getColor: [...SELECTED_GLOW_COLOR, Math.round(glowIntensity)] as [
+                number,
+                number,
+                number,
+                number,
+              ],
+              getWidth: 20 + heartbeat * 8,
+              widthUnits: "pixels",
+              widthMinPixels: 16,
+              widthMaxPixels: 40,
+              pickable: false,
+              capRounded: true,
+              jointRounded: true,
+              updateTriggers: {
+                getColor: [animationTime],
+                getWidth: [animationTime],
+              },
+            }),
+            // Middle glow layer - pulses with heartbeat
+            new PathLayer<Walk>({
+              id: "selected-glow-middle",
+              data: [selectedWalk],
+              getPath: (d) => d.coordinates,
+              getColor: [
+                ...SELECTED_GLOW_COLOR,
+                Math.round(50 + heartbeat * 50),
+              ] as [number, number, number, number],
+              getWidth: 12 + heartbeat * 4,
+              widthUnits: "pixels",
+              widthMinPixels: 10,
+              widthMaxPixels: 24,
+              pickable: false,
+              capRounded: true,
+              jointRounded: true,
+              updateTriggers: {
+                getColor: [animationTime],
+                getWidth: [animationTime],
+              },
+            }),
+            // Inner pulsing glow layer - main heartbeat effect
+            new PathLayer<Walk>({
+              id: "selected-pulse",
+              data: [selectedWalk],
+              getPath: (d) => d.coordinates,
+              getColor: [
+                ...SELECTED_GLOW_COLOR,
+                Math.round(pulseOpacity * 255),
+              ] as [number, number, number, number],
+              getWidth: pulseWidth,
+              widthUnits: "pixels",
+              widthMinPixels: 6,
+              widthMaxPixels: 22,
+              pickable: false,
+              capRounded: true,
+              jointRounded: true,
+              updateTriggers: {
+                getColor: [animationTime],
+                getWidth: [animationTime],
+              },
+            }),
+          ]
+        : []),
+      // Main walks layer
       new PathLayer<Walk>({
         id: "walks-layer",
         data: walks,
         getPath: (d) => d.coordinates,
         getColor: (d) => {
-          // Highlight selected or hovered walk
+          // Highlight selected walk with vibrant color
           if (selectedWalk?.id === d.id) {
-            return [255, 255, 255, 255];
+            return SELECTED_COLOR;
           }
+          // Dim other routes when one is selected
+          if (selectedWalk) {
+            if (hoveredWalkId === d.id) {
+              return [255, 255, 255, 100];
+            }
+            // Significantly dim non-selected routes
+            return [100, 100, 100, 60];
+          }
+          // Normal state (no selection)
           if (hoveredWalkId === d.id) {
             return [255, 255, 255, 220];
           }
@@ -94,10 +234,14 @@ export default function Map({
         },
         getWidth: (d) => {
           if (selectedWalk?.id === d.id) {
-            return 4;
+            return 5;
           }
           if (hoveredWalkId === d.id) {
             return 3;
+          }
+          // Make non-selected routes thinner when one is selected
+          if (selectedWalk) {
+            return 1.5;
           }
           return 2;
         },
@@ -106,14 +250,27 @@ export default function Map({
         widthMaxPixels: 10,
         pickable: true,
         autoHighlight: true,
-        highlightColor: [255, 255, 255, 255],
+        highlightColor: selectedWalk
+          ? [150, 150, 150, 150]
+          : [255, 255, 255, 255],
+        capRounded: true,
+        jointRounded: true,
         updateTriggers: {
           getColor: [selectedWalk?.id, hoveredWalkId],
           getWidth: [selectedWalk?.id, hoveredWalkId],
         },
       }),
     ],
-    [walks, selectedWalk?.id, hoveredWalkId],
+    [
+      walks,
+      selectedWalk,
+      hoveredWalkId,
+      animationTime,
+      pulseOpacity,
+      pulseWidth,
+      glowIntensity,
+      heartbeat,
+    ],
   );
 
   const handleClick = useCallback(
