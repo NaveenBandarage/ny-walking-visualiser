@@ -7,24 +7,35 @@ import {
   useEffect,
   useCallback,
   ReactNode,
+  useRef,
 } from "react";
-import { Walk, WalkStats, PickedWalk } from "./types";
-import { fetchAndParseGPX, parseGPXFiles } from "./gpx-parser";
-import { calculateWalkStats } from "./utils";
+import { Walk, WalkStats, PickedWalk, WalkPoint } from "./types";
+
+// Extended Walk type with optional full coordinates
+interface WalkWithLOD extends Walk {
+  coordinatesFull?: [number, number][];
+  pointsFull?: WalkPoint[];
+  bounds?: {
+    minLng: number;
+    maxLng: number;
+    minLat: number;
+    maxLat: number;
+  };
+}
 
 interface WalksContextType {
-  walks: Walk[];
+  walks: WalkWithLOD[];
   stats: WalkStats;
   isLoading: boolean;
-  selectedWalk: Walk | null;
-  overlappingWalks: Walk[];
+  selectedWalk: WalkWithLOD | null;
+  overlappingWalks: WalkWithLOD[];
   overlayPosition: { x: number; y: number } | null;
-  selectWalk: (walk: Walk | null) => void;
+  selectWalk: (walk: WalkWithLOD | null) => void;
   handleWalkClick: (picked: PickedWalk[]) => void;
-  handleOverlapSelect: (walk: Walk) => void;
+  handleOverlapSelect: (walk: WalkWithLOD) => void;
   closeOverlay: () => void;
-  addWalks: (files: File[]) => Promise<void>;
   refreshWalks: () => Promise<void>;
+  loadFullCoordinates: (walkId: string) => Promise<void>;
 }
 
 const WalksContext = createContext<WalksContextType | null>(null);
@@ -42,30 +53,84 @@ interface WalksProviderProps {
 }
 
 export function WalksProvider({ children }: WalksProviderProps) {
-  const [walks, setWalks] = useState<Walk[]>([]);
+  const [walks, setWalks] = useState<WalkWithLOD[]>([]);
+  const [stats, setStats] = useState<WalkStats>({
+    totalWalks: 0,
+    totalDistance: 0,
+    totalDuration: 0,
+    averageDistance: 0,
+    averageDuration: 0,
+  });
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedWalk, setSelectedWalk] = useState<Walk | null>(null);
-  const [overlappingWalks, setOverlappingWalks] = useState<Walk[]>([]);
+  const [selectedWalk, setSelectedWalk] = useState<WalkWithLOD | null>(null);
+  const [overlappingWalks, setOverlappingWalks] = useState<WalkWithLOD[]>([]);
   const [overlayPosition, setOverlayPosition] = useState<{
     x: number;
     y: number;
   } | null>(null);
 
-  const stats = calculateWalkStats(walks);
+  // Cache for full coordinates
+  const fullCoordinatesCache = useRef<
+    Map<string, { coordinates: [number, number][]; points: WalkPoint[] }>
+  >(new Map());
 
-  // Load GPX files from public directory on mount
+  // Load walks from the new API
   const refreshWalks = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetch("/api/gpx");
+      const response = await fetch("/api/walks");
       const data = await response.json();
 
-      if (data.files && data.files.length > 0) {
-        const parsedWalks = await fetchAndParseGPX(data.files);
-        setWalks(parsedWalks);
+      if (data.error) {
+        console.warn("Walks API warning:", data.error);
+      }
+
+      if (data.walks && data.walks.length > 0) {
+        // Transform API response to Walk objects
+        const transformedWalks: WalkWithLOD[] = data.walks.map(
+          (w: {
+            id: string;
+            name: string;
+            description?: string;
+            date: string;
+            distance: number;
+            duration: number;
+            elevationGain?: number;
+            elevationLoss?: number;
+            coordinates: [number, number][];
+            color?: [number, number, number, number];
+            bounds?: {
+              minLng: number;
+              maxLng: number;
+              minLat: number;
+              maxLat: number;
+            };
+          }) => ({
+            id: w.id,
+            name: w.name,
+            description: w.description,
+            date: new Date(w.date),
+            distance: w.distance,
+            duration: w.duration,
+            elevationGain: w.elevationGain,
+            elevationLoss: w.elevationLoss,
+            coordinates: w.coordinates,
+            points: [], // Points are loaded on demand
+            color: w.color,
+            bounds: w.bounds,
+          }),
+        );
+
+        setWalks(transformedWalks);
+      } else {
+        setWalks([]);
+      }
+
+      if (data.stats) {
+        setStats(data.stats);
       }
     } catch (error) {
-      console.error("Error loading GPX files:", error);
+      console.error("Error loading walks:", error);
     } finally {
       setIsLoading(false);
     }
@@ -75,44 +140,116 @@ export function WalksProvider({ children }: WalksProviderProps) {
     refreshWalks();
   }, [refreshWalks]);
 
-  const selectWalk = useCallback((walk: Walk | null) => {
-    setSelectedWalk(walk);
-    setOverlappingWalks([]);
-    setOverlayPosition(null);
-  }, []);
-
-  const handleWalkClick = useCallback((picked: PickedWalk[]) => {
-    if (picked.length === 0) {
+  // Load full coordinates for a specific walk
+  const loadFullCoordinates = useCallback(async (walkId: string) => {
+    // Check cache first
+    if (fullCoordinatesCache.current.has(walkId)) {
       return;
     }
 
-    if (picked.length === 1) {
-      // Single walk clicked - select it directly
-      setSelectedWalk(picked[0].walk);
-      setOverlappingWalks([]);
-      setOverlayPosition(null);
-    } else {
-      // Multiple walks overlapping - show selector
-      setOverlappingWalks(picked.map((p) => p.walk));
-      setOverlayPosition({ x: picked[0].x, y: picked[0].y });
-      setSelectedWalk(null);
+    try {
+      const response = await fetch(`/api/walks/${walkId}`);
+      const data = await response.json();
+
+      if (data.walk) {
+        const fullCoords = data.walk.coordinates;
+        const fullPoints = data.walk.points.map(
+          (p: {
+            longitude: number;
+            latitude: number;
+            elevation?: number;
+            time?: string;
+          }) => ({
+            ...p,
+            time: p.time ? new Date(p.time) : undefined,
+          }),
+        );
+
+        // Cache the full coordinates
+        fullCoordinatesCache.current.set(walkId, {
+          coordinates: fullCoords,
+          points: fullPoints,
+        });
+
+        // Update the walk in state with full coordinates
+        setWalks((prev) =>
+          prev.map((w) =>
+            w.id === walkId
+              ? { ...w, coordinatesFull: fullCoords, pointsFull: fullPoints }
+              : w,
+          ),
+        );
+
+        // Update selected walk if it matches
+        setSelectedWalk((prev) =>
+          prev?.id === walkId
+            ? { ...prev, coordinatesFull: fullCoords, pointsFull: fullPoints }
+            : prev,
+        );
+      }
+    } catch (error) {
+      console.error("Error loading full coordinates:", error);
     }
   }, []);
 
-  const handleOverlapSelect = useCallback((walk: Walk) => {
-    setSelectedWalk(walk);
-    setOverlappingWalks([]);
-    setOverlayPosition(null);
-  }, []);
+  const selectWalk = useCallback(
+    (walk: WalkWithLOD | null) => {
+      setSelectedWalk(walk);
+      setOverlappingWalks([]);
+      setOverlayPosition(null);
+
+      // Load full coordinates when a walk is selected
+      if (walk && !walk.coordinatesFull) {
+        loadFullCoordinates(walk.id);
+      }
+    },
+    [loadFullCoordinates],
+  );
+
+  const handleWalkClick = useCallback(
+    (picked: PickedWalk[]) => {
+      if (picked.length === 0) {
+        return;
+      }
+
+      if (picked.length === 1) {
+        // Single walk clicked - select it directly
+        const walk = picked[0].walk as WalkWithLOD;
+        setSelectedWalk(walk);
+        setOverlappingWalks([]);
+        setOverlayPosition(null);
+
+        // Load full coordinates
+        if (!walk.coordinatesFull) {
+          loadFullCoordinates(walk.id);
+        }
+      } else {
+        // Multiple walks overlapping - show selector
+        setOverlappingWalks(picked.map((p) => p.walk as WalkWithLOD));
+        setOverlayPosition({ x: picked[0].x, y: picked[0].y });
+        setSelectedWalk(null);
+      }
+    },
+    [loadFullCoordinates],
+  );
+
+  const handleOverlapSelect = useCallback(
+    (walk: WalkWithLOD) => {
+      setSelectedWalk(walk);
+      setOverlappingWalks([]);
+      setOverlayPosition(null);
+
+      // Load full coordinates
+      if (!walk.coordinatesFull) {
+        loadFullCoordinates(walk.id);
+      }
+    },
+    [loadFullCoordinates],
+  );
 
   const closeOverlay = useCallback(() => {
     setOverlappingWalks([]);
     setOverlayPosition(null);
-  }, []);
-
-  const addWalks = useCallback(async (files: File[]) => {
-    const newWalks = await parseGPXFiles(files);
-    setWalks((prev) => [...prev, ...newWalks]);
   }, []);
 
   return (
@@ -128,8 +265,8 @@ export function WalksProvider({ children }: WalksProviderProps) {
         handleWalkClick,
         handleOverlapSelect,
         closeOverlay,
-        addWalks,
         refreshWalks,
+        loadFullCoordinates,
       }}
     >
       {children}

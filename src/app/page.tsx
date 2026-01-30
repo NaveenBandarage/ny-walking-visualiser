@@ -60,12 +60,18 @@ function WalkVisualizer() {
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center p-8">
             <p className="text-white/60 mb-2 font-mono">No walks found</p>
-            <p className="text-white/40 text-sm">
+            <p className="text-white/40 text-sm mb-2">
               Add GPX files to the{" "}
               <code className="bg-white/10 px-1.5 py-0.5 rounded">
                 public/gpx
               </code>{" "}
               folder
+            </p>
+            <p className="text-white/40 text-sm">
+              Then run{" "}
+              <code className="bg-white/10 px-1.5 py-0.5 rounded">
+                npm run preprocess
+              </code>
             </p>
           </div>
         </div>

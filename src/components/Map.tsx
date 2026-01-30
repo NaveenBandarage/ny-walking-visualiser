@@ -5,15 +5,41 @@ import MapGL, { MapRef } from "react-map-gl/mapbox";
 import { DeckGL } from "@deck.gl/react";
 import { PathLayer } from "@deck.gl/layers";
 import type { PickingInfo } from "@deck.gl/core";
-import { Walk, ViewState, PickedWalk } from "@/lib/types";
+import { ViewState, PickedWalk, WalkPoint } from "@/lib/types";
 
 import "mapbox-gl/dist/mapbox-gl.css";
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
+// Extended Walk type with LOD support
+interface WalkWithLOD {
+  id: string;
+  name: string;
+  description?: string;
+  date: Date;
+  coordinates: [number, number][];
+  coordinatesFull?: [number, number][];
+  points: WalkPoint[];
+  pointsFull?: WalkPoint[];
+  distance: number;
+  duration: number;
+  elevationGain?: number;
+  elevationLoss?: number;
+  color?: [number, number, number, number];
+  bounds?: {
+    minLng: number;
+    maxLng: number;
+    minLat: number;
+    maxLat: number;
+  };
+}
+
 // Vibrant selected route color (cyan/teal)
 const SELECTED_COLOR: [number, number, number, number] = [0, 255, 220, 255];
 const SELECTED_GLOW_COLOR: [number, number, number] = [0, 255, 220];
+
+// Zoom level threshold for LOD
+const HIGH_DETAIL_ZOOM = 14;
 
 // Heartbeat animation curve - sharp spikes followed by rest
 function heartbeatCurve(t: number): number {
@@ -49,19 +75,19 @@ const INITIAL_VIEW_STATE: ViewState = {
 };
 
 interface MapProps {
-  walks: Walk[];
-  selectedWalk: Walk | null;
+  walks: WalkWithLOD[];
+  selectedWalk: WalkWithLOD | null;
   onWalkClick: (picked: PickedWalk[]) => void;
   onMapClick: () => void;
 }
 
 // Check if two walks overlap at a given point
 function findOverlappingWalks(
-  walks: Walk[],
-  clickedWalk: Walk,
+  walks: WalkWithLOD[],
+  clickedWalk: WalkWithLOD,
   clickPoint: [number, number],
   threshold: number = 0.0005, // roughly 50 meters
-): Walk[] {
+): WalkWithLOD[] {
   return walks.filter((walk) => {
     if (walk.id === clickedWalk.id) return true;
     // Check if any point of this walk is near the click point
@@ -71,6 +97,45 @@ function findOverlappingWalks(
         Math.abs(coord[1] - clickPoint[1]) < threshold,
     );
   });
+}
+
+// Check if a walk's bounds intersect with the viewport
+function isWalkInViewport(
+  walk: WalkWithLOD,
+  viewportBounds: {
+    minLng: number;
+    maxLng: number;
+    minLat: number;
+    maxLat: number;
+  },
+): boolean {
+  if (!walk.bounds) return true; // If no bounds, assume visible
+
+  return !(
+    walk.bounds.maxLng < viewportBounds.minLng ||
+    walk.bounds.minLng > viewportBounds.maxLng ||
+    walk.bounds.maxLat < viewportBounds.minLat ||
+    walk.bounds.minLat > viewportBounds.maxLat
+  );
+}
+
+// Calculate viewport bounds from view state
+function getViewportBounds(
+  viewState: ViewState,
+  width: number = 1920,
+  height: number = 1080,
+): { minLng: number; maxLng: number; minLat: number; maxLat: number } {
+  // Approximate viewport bounds based on zoom and center
+  // This is a simplified calculation
+  const latRange = 180 / Math.pow(2, viewState.zoom);
+  const lngRange = (360 / Math.pow(2, viewState.zoom)) * (width / height);
+
+  return {
+    minLng: viewState.longitude - lngRange / 2,
+    maxLng: viewState.longitude + lngRange / 2,
+    minLat: viewState.latitude - latRange / 2,
+    maxLat: viewState.latitude + latRange / 2,
+  };
 }
 
 export default function Map({
@@ -85,6 +150,23 @@ export default function Map({
   const [isClientReady, setIsClientReady] = useState(false);
   const [animationTime, setAnimationTime] = useState(0);
   const animationRef = useRef<number | null>(null);
+
+  // Determine if we should use high detail based on zoom level
+  const useHighDetail = viewState.zoom >= HIGH_DETAIL_ZOOM;
+
+  // Calculate viewport bounds for culling
+  const viewportBounds = useMemo(
+    () => getViewportBounds(viewState),
+    [viewState.longitude, viewState.latitude, viewState.zoom],
+  );
+
+  // Filter walks to only those in viewport (viewport culling)
+  const visibleWalks = useMemo(() => {
+    // Always show all walks at low zoom to avoid pop-in
+    if (viewState.zoom < 10) return walks;
+
+    return walks.filter((walk) => isWalkInViewport(walk, viewportBounds));
+  }, [walks, viewportBounds, viewState.zoom]);
 
   // Heartbeat animation for selected route
   useEffect(() => {
@@ -136,16 +218,36 @@ export default function Map({
   // Glow intensity for outer layers
   const glowIntensity = 30 + heartbeat * 40;
 
+  // Get coordinates for a walk, using full coordinates when available and appropriate
+  const getWalkCoordinates = useCallback(
+    (
+      walk: WalkWithLOD,
+      forceHighDetail: boolean = false,
+    ): [number, number][] => {
+      // Use full coordinates if:
+      // 1. This is the selected walk (always show full detail)
+      // 2. We're zoomed in far enough AND full coordinates are available
+      if (forceHighDetail || selectedWalk?.id === walk.id) {
+        return walk.coordinatesFull || walk.coordinates;
+      }
+      if (useHighDetail && walk.coordinatesFull) {
+        return walk.coordinatesFull;
+      }
+      return walk.coordinates;
+    },
+    [selectedWalk?.id, useHighDetail],
+  );
+
   // Create the path layers with glow and pulse effects
   const layers = useMemo(
     () => [
       // Outer glow layer for selected route (widest, pulses with heartbeat)
       ...(selectedWalk
         ? [
-            new PathLayer<Walk>({
+            new PathLayer<WalkWithLOD>({
               id: "selected-glow-outer",
               data: [selectedWalk],
-              getPath: (d) => d.coordinates,
+              getPath: (d) => getWalkCoordinates(d, true),
               getColor: [...SELECTED_GLOW_COLOR, Math.round(glowIntensity)] as [
                 number,
                 number,
@@ -162,13 +264,14 @@ export default function Map({
               updateTriggers: {
                 getColor: [animationTime],
                 getWidth: [animationTime],
+                getPath: [selectedWalk?.coordinatesFull?.length],
               },
             }),
             // Middle glow layer - pulses with heartbeat
-            new PathLayer<Walk>({
+            new PathLayer<WalkWithLOD>({
               id: "selected-glow-middle",
               data: [selectedWalk],
-              getPath: (d) => d.coordinates,
+              getPath: (d) => getWalkCoordinates(d, true),
               getColor: [
                 ...SELECTED_GLOW_COLOR,
                 Math.round(50 + heartbeat * 50),
@@ -183,13 +286,14 @@ export default function Map({
               updateTriggers: {
                 getColor: [animationTime],
                 getWidth: [animationTime],
+                getPath: [selectedWalk?.coordinatesFull?.length],
               },
             }),
             // Inner pulsing glow layer - main heartbeat effect
-            new PathLayer<Walk>({
+            new PathLayer<WalkWithLOD>({
               id: "selected-pulse",
               data: [selectedWalk],
-              getPath: (d) => d.coordinates,
+              getPath: (d) => getWalkCoordinates(d, true),
               getColor: [
                 ...SELECTED_GLOW_COLOR,
                 Math.round(pulseOpacity * 255),
@@ -204,15 +308,16 @@ export default function Map({
               updateTriggers: {
                 getColor: [animationTime],
                 getWidth: [animationTime],
+                getPath: [selectedWalk?.coordinatesFull?.length],
               },
             }),
           ]
         : []),
-      // Main walks layer
-      new PathLayer<Walk>({
+      // Main walks layer - uses viewport-culled walks
+      new PathLayer<WalkWithLOD>({
         id: "walks-layer",
-        data: walks,
-        getPath: (d) => d.coordinates,
+        data: visibleWalks,
+        getPath: (d) => getWalkCoordinates(d),
         getColor: (d) => {
           // Highlight selected walk with vibrant color
           if (selectedWalk?.id === d.id) {
@@ -258,11 +363,12 @@ export default function Map({
         updateTriggers: {
           getColor: [selectedWalk?.id, hoveredWalkId],
           getWidth: [selectedWalk?.id, hoveredWalkId],
+          getPath: [useHighDetail],
         },
       }),
     ],
     [
-      walks,
+      visibleWalks,
       selectedWalk,
       hoveredWalkId,
       animationTime,
@@ -270,11 +376,13 @@ export default function Map({
       pulseWidth,
       glowIntensity,
       heartbeat,
+      getWalkCoordinates,
+      useHighDetail,
     ],
   );
 
   const handleClick = useCallback(
-    (info: PickingInfo<Walk>) => {
+    (info: PickingInfo<WalkWithLOD>) => {
       if (!info.object) {
         onMapClick();
         return;
@@ -286,13 +394,13 @@ export default function Map({
       if (coordinate) {
         // Find all walks that overlap at this point
         const overlapping = findOverlappingWalks(
-          walks,
+          visibleWalks,
           clickedWalk,
           coordinate,
         );
 
         const pickedWalks: PickedWalk[] = overlapping.map((walk) => ({
-          walk,
+          walk: walk as unknown as import("@/lib/types").Walk,
           x: info.x || 0,
           y: info.y || 0,
         }));
@@ -300,28 +408,36 @@ export default function Map({
         onWalkClick(pickedWalks);
       } else {
         // Fallback to single selection
-        onWalkClick([{ walk: clickedWalk, x: info.x || 0, y: info.y || 0 }]);
+        onWalkClick([
+          {
+            walk: clickedWalk as unknown as import("@/lib/types").Walk,
+            x: info.x || 0,
+            y: info.y || 0,
+          },
+        ]);
       }
     },
-    [walks, onWalkClick, onMapClick],
+    [visibleWalks, onWalkClick, onMapClick],
   );
 
-  const handleHover = useCallback((info: PickingInfo<Walk>) => {
+  const handleHover = useCallback((info: PickingInfo<WalkWithLOD>) => {
     setHoveredWalkId(info.object?.id || null);
   }, []);
 
   // Fit bounds to show all walks when data loads
   useEffect(() => {
     if (walks.length > 0 && mapRef.current) {
-      const allCoords = walks.flatMap((w) => w.coordinates);
-      if (allCoords.length > 0) {
-        // Use reduce instead of spread to avoid call stack overflow with large arrays
-        const bounds = allCoords.reduce(
-          (acc, coord) => ({
-            minLng: Math.min(acc.minLng, coord[0]),
-            maxLng: Math.max(acc.maxLng, coord[0]),
-            minLat: Math.min(acc.minLat, coord[1]),
-            maxLat: Math.max(acc.maxLat, coord[1]),
+      // Use precomputed bounds if available
+      const walksWithBounds = walks.filter((w) => w.bounds);
+
+      if (walksWithBounds.length > 0) {
+        // Calculate bounds from precomputed walk bounds
+        const bounds = walksWithBounds.reduce(
+          (acc, walk) => ({
+            minLng: Math.min(acc.minLng, walk.bounds!.minLng),
+            maxLng: Math.max(acc.maxLng, walk.bounds!.maxLng),
+            minLat: Math.min(acc.minLat, walk.bounds!.minLat),
+            maxLat: Math.max(acc.maxLat, walk.bounds!.maxLat),
           }),
           {
             minLng: Infinity,
@@ -341,6 +457,36 @@ export default function Map({
             duration: 1000,
           },
         );
+      } else {
+        // Fallback to calculating from coordinates
+        const allCoords = walks.flatMap((w) => w.coordinates);
+        if (allCoords.length > 0) {
+          const bounds = allCoords.reduce(
+            (acc, coord) => ({
+              minLng: Math.min(acc.minLng, coord[0]),
+              maxLng: Math.max(acc.maxLng, coord[0]),
+              minLat: Math.min(acc.minLat, coord[1]),
+              maxLat: Math.max(acc.maxLat, coord[1]),
+            }),
+            {
+              minLng: Infinity,
+              maxLng: -Infinity,
+              minLat: Infinity,
+              maxLat: -Infinity,
+            },
+          );
+
+          mapRef.current.fitBounds(
+            [
+              [bounds.minLng, bounds.minLat],
+              [bounds.maxLng, bounds.maxLat],
+            ],
+            {
+              padding: 50,
+              duration: 1000,
+            },
+          );
+        }
       }
     }
   }, [walks]);
@@ -348,34 +494,48 @@ export default function Map({
   // Focus on selected walk
   useEffect(() => {
     if (selectedWalk && mapRef.current) {
-      const coords = selectedWalk.coordinates;
-      if (coords.length > 0) {
-        // Use reduce instead of spread to avoid call stack overflow with large arrays
-        const bounds = coords.reduce(
-          (acc, coord) => ({
-            minLng: Math.min(acc.minLng, coord[0]),
-            maxLng: Math.max(acc.maxLng, coord[0]),
-            minLat: Math.min(acc.minLat, coord[1]),
-            maxLat: Math.max(acc.maxLat, coord[1]),
-          }),
-          {
-            minLng: Infinity,
-            maxLng: -Infinity,
-            minLat: Infinity,
-            maxLat: -Infinity,
-          },
-        );
-
+      // Use precomputed bounds if available
+      if (selectedWalk.bounds) {
         mapRef.current.fitBounds(
           [
-            [bounds.minLng, bounds.minLat],
-            [bounds.maxLng, bounds.maxLat],
+            [selectedWalk.bounds.minLng, selectedWalk.bounds.minLat],
+            [selectedWalk.bounds.maxLng, selectedWalk.bounds.maxLat],
           ],
           {
             padding: 100,
             duration: 500,
           },
         );
+      } else {
+        // Fallback to calculating from coordinates
+        const coords = selectedWalk.coordinatesFull || selectedWalk.coordinates;
+        if (coords.length > 0) {
+          const bounds = coords.reduce(
+            (acc, coord) => ({
+              minLng: Math.min(acc.minLng, coord[0]),
+              maxLng: Math.max(acc.maxLng, coord[0]),
+              minLat: Math.min(acc.minLat, coord[1]),
+              maxLat: Math.max(acc.maxLat, coord[1]),
+            }),
+            {
+              minLng: Infinity,
+              maxLng: -Infinity,
+              minLat: Infinity,
+              maxLat: -Infinity,
+            },
+          );
+
+          mapRef.current.fitBounds(
+            [
+              [bounds.minLng, bounds.minLat],
+              [bounds.maxLng, bounds.maxLat],
+            ],
+            {
+              padding: 100,
+              duration: 500,
+            },
+          );
+        }
       }
     }
   }, [selectedWalk]);

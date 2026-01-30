@@ -42,3 +42,8 @@ next-env.d.ts
 
 # GPX data files
 /public/gpx/
+
+# SQLite database
+/data/*.db
+/data/*.db-wal
+/data/*.db-shm
