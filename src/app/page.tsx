@@ -1,11 +1,14 @@
 "use client";
 
+import { useState, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { WalksProvider, useWalks } from "@/lib/WalksContext";
 import Header from "@/components/Header";
 import RoutePanel from "@/components/RoutePanel";
 import OverlapSelector from "@/components/OverlapSelector";
 import KeyboardShortcuts from "@/components/KeyboardShortcuts";
+import SearchModal from "@/components/SearchModal";
+import { Walk } from "@/lib/types";
 
 // Dynamic import for Map to avoid SSR issues with Mapbox
 const Map = dynamic(() => import("@/components/Map"), {
@@ -31,6 +34,25 @@ function WalkVisualizer() {
     closeOverlay,
   } = useWalks();
 
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+
+  const handleToggleSearch = useCallback(() => {
+    setIsSearchOpen((prev) => !prev);
+  }, []);
+
+  const handleToggleChat = useCallback(() => {
+    setIsChatOpen((prev) => !prev);
+  }, []);
+
+  const handleSearchSelect = useCallback(
+    (walk: Walk) => {
+      selectWalk(walk);
+      setIsSearchOpen(false);
+    },
+    [selectWalk],
+  );
+
   return (
     <main className="h-screen w-screen relative overflow-hidden bg-black">
       {/* Map */}
@@ -45,7 +67,12 @@ function WalkVisualizer() {
       <Header stats={stats} isLoading={isLoading} />
 
       {/* Route detail panel */}
-      <RoutePanel walk={selectedWalk} onClose={() => selectWalk(null)} />
+      <RoutePanel
+        walk={selectedWalk}
+        onClose={() => selectWalk(null)}
+        showChatOnly={isChatOpen && !selectedWalk}
+        onCloseChatOnly={() => setIsChatOpen(false)}
+      />
 
       {/* Overlap selector popup */}
       <OverlapSelector
@@ -88,13 +115,25 @@ function WalkVisualizer() {
       )}
 
       {/* Keyboard shortcuts handler */}
-      <KeyboardShortcuts />
+      <KeyboardShortcuts
+        onToggleSearch={handleToggleSearch}
+        onToggleChat={handleToggleChat}
+        isSearchOpen={isSearchOpen}
+      />
+
+      {/* Search modal */}
+      <SearchModal
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        walks={walks}
+        onSelectWalk={handleSearchSelect}
+      />
 
       {/* Keyboard hint */}
-      {walks.length > 0 && !selectedWalk && (
+      {walks.length > 0 && !selectedWalk && !isChatOpen && (
         <div className="absolute bottom-4 right-4 z-10">
           <div className="text-white/30 text-xs font-mono">
-            Use arrow keys to navigate
+            T search · C chat · Arrow keys navigate
           </div>
         </div>
       )}

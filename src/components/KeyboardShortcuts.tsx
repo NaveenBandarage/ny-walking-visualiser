@@ -3,11 +3,46 @@
 import { useEffect } from "react";
 import { useWalks } from "@/lib/WalksContext";
 
-export default function KeyboardShortcuts() {
+interface KeyboardShortcutsProps {
+  onToggleSearch?: () => void;
+  onToggleChat?: () => void;
+  isSearchOpen?: boolean;
+}
+
+export default function KeyboardShortcuts({
+  onToggleSearch,
+  onToggleChat,
+  isSearchOpen,
+}: KeyboardShortcutsProps) {
   const { walks, selectedWalk, selectWalk, closeOverlay } = useWalks();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't handle shortcuts if search modal is open (it handles its own keys)
+      if (isSearchOpen) return;
+
+      // Don't trigger if typing in an input
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      // 'T' to toggle search modal
+      if (e.key === "t" || e.key === "T") {
+        e.preventDefault();
+        onToggleSearch?.();
+        return;
+      }
+
+      // 'C' to toggle chat panel
+      if (e.key === "c" || e.key === "C") {
+        e.preventDefault();
+        onToggleChat?.();
+        return;
+      }
+
       // Escape to deselect
       if (e.key === "Escape") {
         selectWalk(null);
@@ -37,7 +72,15 @@ export default function KeyboardShortcuts() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [walks, selectedWalk, selectWalk, closeOverlay]);
+  }, [
+    walks,
+    selectedWalk,
+    selectWalk,
+    closeOverlay,
+    onToggleSearch,
+    onToggleChat,
+    isSearchOpen,
+  ]);
 
   return null;
 }
