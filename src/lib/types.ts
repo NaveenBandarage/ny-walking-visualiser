@@ -9,6 +9,7 @@ export interface Walk {
   id: string;
   name: string;
   description?: string;
+  summary?: string; // AI-generated summary of the route
   date: Date;
   coordinates: [number, number][];
   points: WalkPoint[];

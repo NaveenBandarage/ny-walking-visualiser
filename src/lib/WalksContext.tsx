@@ -92,6 +92,7 @@ export function WalksProvider({ children }: WalksProviderProps) {
             id: string;
             name: string;
             description?: string;
+            summary?: string;
             date: string;
             distance: number;
             duration: number;
@@ -109,6 +110,7 @@ export function WalksProvider({ children }: WalksProviderProps) {
             id: w.id,
             name: w.name,
             description: w.description,
+            summary: w.summary,
             date: new Date(w.date),
             distance: w.distance,
             duration: w.duration,

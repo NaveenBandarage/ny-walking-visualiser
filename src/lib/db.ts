@@ -30,6 +30,7 @@ function initializeSchema() {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
+      summary TEXT,
       date TEXT NOT NULL,
       distance_km REAL NOT NULL,
       duration_minutes REAL NOT NULL,
@@ -62,6 +63,7 @@ export interface WalkRow {
   id: string;
   name: string;
   description: string | null;
+  summary: string | null;
   date: string;
   distance_km: number;
   duration_minutes: number;
@@ -85,6 +87,7 @@ export function insertWalk(walk: {
   id: string;
   name: string;
   description?: string;
+  summary?: string;
   date: Date;
   distance: number;
   duration: number;
@@ -121,12 +124,12 @@ export function insertWalk(walk: {
 
   const stmt = database.prepare(`
     INSERT OR REPLACE INTO walks (
-      id, name, description, date, distance_km, duration_minutes,
+      id, name, description, summary, date, distance_km, duration_minutes,
       elevation_gain, elevation_loss, coordinates_simplified, coordinates_full,
       points, color, bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat,
       source_file
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `);
 
@@ -134,6 +137,7 @@ export function insertWalk(walk: {
     walk.id,
     walk.name,
     walk.description || null,
+    walk.summary || null,
     walk.date.toISOString(),
     walk.distance,
     walk.duration,
@@ -158,7 +162,7 @@ export function getAllWalksSimplified(): WalkRow[] {
   const database = getDb();
   return database
     .prepare(
-      `SELECT id, name, description, date, distance_km, duration_minutes,
+      `SELECT id, name, description, summary, date, distance_km, duration_minutes,
               elevation_gain, elevation_loss, coordinates_simplified, color,
               bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat
        FROM walks
@@ -179,7 +183,7 @@ export function getWalksInBounds(
   const database = getDb();
   return database
     .prepare(
-      `SELECT id, name, description, date, distance_km, duration_minutes,
+      `SELECT id, name, description, summary, date, distance_km, duration_minutes,
               elevation_gain, elevation_loss, coordinates_simplified, color,
               bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat
        FROM walks
@@ -269,4 +273,63 @@ export function isDatabaseReady(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Get all processed source files from the database
+ */
+export function getProcessedSourceFiles(): string[] {
+  const database = getDb();
+  const rows = database
+    .prepare(
+      `SELECT DISTINCT source_file FROM walks WHERE source_file IS NOT NULL`,
+    )
+    .all() as { source_file: string }[];
+  return rows.map((r) => r.source_file);
+}
+
+/**
+ * Get walks that are missing AI summaries
+ */
+export function getWalksWithoutSummary(): {
+  id: string;
+  source_file: string;
+  name: string;
+}[] {
+  const database = getDb();
+  return database
+    .prepare(
+      `SELECT id, source_file, name FROM walks 
+       WHERE summary IS NULL OR summary = ''
+       ORDER BY date DESC`,
+    )
+    .all() as { id: string; source_file: string; name: string }[];
+}
+
+/**
+ * Update just the summary for a walk
+ */
+export function updateWalkSummary(id: string, summary: string): void {
+  const database = getDb();
+  database
+    .prepare(`UPDATE walks SET summary = ? WHERE id = ?`)
+    .run(summary, id);
+}
+
+/**
+ * Get walk by source file
+ */
+export function getWalkBySourceFile(sourceFile: string): WalkRow | undefined {
+  const database = getDb();
+  return database
+    .prepare(`SELECT * FROM walks WHERE source_file = ?`)
+    .get(sourceFile) as WalkRow | undefined;
+}
+
+/**
+ * Delete a walk by source file
+ */
+export function deleteWalkBySourceFile(sourceFile: string): void {
+  const database = getDb();
+  database.prepare(`DELETE FROM walks WHERE source_file = ?`).run(sourceFile);
 }

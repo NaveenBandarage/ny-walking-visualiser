@@ -3,7 +3,7 @@
  * GPX Preprocessing Script
  *
  * This script reads all GPX files from public/gpx/, parses them,
- * simplifies the coordinates, and stores them in SQLite database.
+ * simplifies the coordinates, generates AI summaries, and stores them in SQLite database.
  *
  * Usage: npm run preprocess
  */
@@ -12,8 +12,29 @@ import fs from "fs";
 import path from "path";
 import { DOMParser } from "@xmldom/xmldom";
 import { gpx } from "@tmcw/togeojson";
-import { insertWalk, clearWalks, closeDb, getWalkCount } from "../src/lib/db";
+import {
+  insertWalk,
+  clearWalks,
+  closeDb,
+  getWalkCount,
+  getProcessedSourceFiles,
+  getWalksWithoutSummary,
+  updateWalkSummary,
+  getWalkBySourceFile,
+} from "../src/lib/db";
 import { simplifyPath, getSimplificationRatio } from "../src/lib/simplify";
+import {
+  isOllamaAvailable,
+  generateRouteSummary,
+  getOllamaConfig,
+} from "../src/lib/ollama";
+
+// Parse command line arguments
+const args = process.argv.slice(2);
+const forceRebuild = args.includes("--force") || args.includes("-f");
+const statusOnly = args.includes("--status") || args.includes("-s");
+const summariesOnly =
+  args.includes("--summaries") || args.includes("--generate-summaries");
 
 // Types
 interface WalkPoint {
@@ -271,11 +292,151 @@ function parseGPXFile(filePath: string, index: number) {
 }
 
 /**
+ * Show processing status
+ */
+function showStatus(gpxFiles: string[], processedFiles: string[]) {
+  const gpxFileNames = gpxFiles.map((f) => path.basename(f));
+  const processedSet = new Set(processedFiles);
+
+  const unprocessed = gpxFileNames.filter((f) => !processedSet.has(f));
+  const processed = gpxFileNames.filter((f) => processedSet.has(f));
+
+  // Check for orphaned entries (in DB but file no longer exists)
+  const gpxSet = new Set(gpxFileNames);
+  const orphaned = processedFiles.filter((f) => !gpxSet.has(f));
+
+  console.log("📊 Processing Status");
+  console.log("====================\n");
+
+  console.log(`   Total GPX files:     ${gpxFileNames.length}`);
+  console.log(`   Already processed:   ${processed.length}`);
+  console.log(`   Need processing:     ${unprocessed.length}`);
+  if (orphaned.length > 0) {
+    console.log(
+      `   Orphaned entries:    ${orphaned.length} (in DB but file deleted)`,
+    );
+  }
+
+  // Check for missing summaries
+  const walksWithoutSummary = getWalksWithoutSummary();
+  if (walksWithoutSummary.length > 0) {
+    console.log(`   Missing AI summaries: ${walksWithoutSummary.length}`);
+  }
+
+  if (unprocessed.length > 0) {
+    console.log("\n📭 Unprocessed files:");
+    unprocessed.slice(0, 20).forEach((f) => console.log(`   - ${f}`));
+    if (unprocessed.length > 20) {
+      console.log(`   ... and ${unprocessed.length - 20} more`);
+    }
+  }
+
+  if (walksWithoutSummary.length > 0) {
+    console.log("\n🤖 Files without AI summaries:");
+    walksWithoutSummary
+      .slice(0, 10)
+      .forEach((w) => console.log(`   - ${w.source_file}`));
+    if (walksWithoutSummary.length > 10) {
+      console.log(`   ... and ${walksWithoutSummary.length - 10} more`);
+    }
+  }
+
+  if (unprocessed.length === 0 && walksWithoutSummary.length === 0) {
+    console.log("\n✅ All files are fully processed with AI summaries!");
+  } else {
+    console.log("\n💡 Tips:");
+    if (unprocessed.length > 0) {
+      console.log(
+        "   Run 'npm run preprocess' to process new files incrementally",
+      );
+    }
+    if (walksWithoutSummary.length > 0) {
+      console.log(
+        "   Run 'npm run preprocess -- --summaries' to generate missing AI summaries",
+      );
+    }
+    console.log(
+      "   Run 'npm run preprocess -- --force' to rebuild everything from scratch",
+    );
+  }
+}
+
+/**
+ * Generate missing AI summaries for existing walks
+ */
+async function generateMissingSummaries() {
+  console.log("🤖 Generating Missing AI Summaries");
+  console.log("===================================\n");
+
+  const walksWithoutSummary = getWalksWithoutSummary();
+
+  if (walksWithoutSummary.length === 0) {
+    console.log("✅ All walks already have AI summaries!\n");
+    return;
+  }
+
+  const ollamaAvailable = await isOllamaAvailable();
+  if (!ollamaAvailable) {
+    console.log("❌ Ollama is not available. Start it with 'ollama serve'\n");
+    return;
+  }
+
+  const ollamaConfig = getOllamaConfig();
+  console.log(`📂 Found ${walksWithoutSummary.length} walks without summaries`);
+  console.log(`🤖 Using model: ${ollamaConfig.model}\n`);
+
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (const walk of walksWithoutSummary) {
+    const fullWalk = getWalkBySourceFile(walk.source_file);
+    if (!fullWalk) continue;
+
+    try {
+      process.stdout.write(
+        `   🔄 ${walk.source_file.padEnd(40)} Generating...`,
+      );
+
+      const summary = await generateRouteSummary({
+        name: fullWalk.name,
+        distance: fullWalk.distance_km,
+        duration: fullWalk.duration_minutes,
+        elevationGain: fullWalk.elevation_gain || 0,
+        elevationLoss: fullWalk.elevation_loss || 0,
+        date: new Date(fullWalk.date),
+      });
+
+      updateWalkSummary(walk.id, summary);
+      successCount++;
+      process.stdout.write("\r");
+      console.log(`   ✅ ${walk.source_file.padEnd(40)} Done ✨`);
+    } catch (error) {
+      errorCount++;
+      process.stdout.write("\r");
+      console.log(`   ❌ ${walk.source_file.padEnd(40)} Failed`);
+    }
+  }
+
+  console.log("\n===================================");
+  console.log(`📈 Summary: ${successCount} generated, ${errorCount} failed`);
+  console.log(
+    `   Total walks with summaries: ${getWalkCount() - getWalksWithoutSummary().length}/${getWalkCount()}\n`,
+  );
+}
+
+/**
  * Main preprocessing function
  */
 async function main() {
   console.log("🚀 GPX Preprocessing Script");
   console.log("==========================\n");
+
+  if (!forceRebuild && !statusOnly && !summariesOnly) {
+    console.log("💡 Running in incremental mode (only new files)");
+    console.log("   Use --force to rebuild everything");
+    console.log("   Use --status to see what needs processing");
+    console.log("   Use --summaries to generate missing AI summaries\n");
+  }
 
   // Check if GPX directory exists
   if (!fs.existsSync(GPX_DIR)) {
@@ -300,29 +461,124 @@ async function main() {
     process.exit(0);
   }
 
+  // Get already processed files
+  const processedFiles = getProcessedSourceFiles();
+
+  // Status only mode
+  if (statusOnly) {
+    showStatus(gpxFiles, processedFiles);
+    closeDb();
+    return;
+  }
+
+  // Summaries only mode
+  if (summariesOnly) {
+    await generateMissingSummaries();
+    closeDb();
+    return;
+  }
+
   console.log(`📂 Found ${gpxFiles.length} GPX files\n`);
 
-  // Clear existing data
-  console.log("🗑️  Clearing existing database...");
-  clearWalks();
+  // Check if Ollama is available for AI summaries
+  const ollamaAvailable = await isOllamaAvailable();
+  const ollamaConfig = getOllamaConfig();
+  if (ollamaAvailable) {
+    console.log(
+      `🤖 Ollama available - will generate AI summaries using ${ollamaConfig.model}`,
+    );
+  } else {
+    console.log("⚠️  Ollama not available - skipping AI summary generation");
+    console.log("   Start Ollama with 'ollama serve' to enable summaries\n");
+  }
+
+  // Determine which files to process
+  let filesToProcess: string[];
+
+  if (forceRebuild) {
+    console.log("\n🗑️  Force rebuild: Clearing existing database...");
+    clearWalks();
+    filesToProcess = gpxFiles;
+  } else {
+    // Incremental mode - only process new files
+    const processedSet = new Set(processedFiles);
+    filesToProcess = gpxFiles.filter(
+      (f) => !processedSet.has(path.basename(f)),
+    );
+
+    if (filesToProcess.length === 0) {
+      console.log("\n✅ All files already processed!");
+
+      // Check if there are missing summaries
+      const walksWithoutSummary = getWalksWithoutSummary();
+      if (walksWithoutSummary.length > 0) {
+        console.log(
+          `⚠️  ${walksWithoutSummary.length} walks are missing AI summaries`,
+        );
+        console.log(
+          "   Run 'npm run preprocess -- --summaries' to generate them\n",
+        );
+      }
+
+      console.log(`   Database entries: ${getWalkCount()}`);
+      closeDb();
+      return;
+    }
+
+    console.log(`\n📊 Already processed: ${processedFiles.length} files`);
+    console.log(`📥 New files to process: ${filesToProcess.length}`);
+  }
 
   // Process each file
   let successCount = 0;
   let errorCount = 0;
+  let summaryCount = 0;
   let totalOriginalPoints = 0;
   let totalSimplifiedPoints = 0;
 
   console.log("\n📊 Processing files:\n");
 
-  for (let i = 0; i < gpxFiles.length; i++) {
-    const filePath = gpxFiles[i];
+  // Use the overall index for color assignment in force mode
+  const startIndex = forceRebuild ? 0 : processedFiles.length;
+
+  for (let i = 0; i < filesToProcess.length; i++) {
+    const filePath = filesToProcess[i];
     const fileName = path.basename(filePath);
+    const colorIndex = startIndex + i;
 
     try {
-      const walk = parseGPXFile(filePath, i);
+      const walk = parseGPXFile(filePath, colorIndex);
 
       if (walk) {
-        insertWalk(walk);
+        // Generate AI summary if Ollama is available
+        let summary: string | undefined;
+        if (ollamaAvailable) {
+          try {
+            process.stdout.write(
+              `   🔄 ${fileName.padEnd(40)} Generating summary...`,
+            );
+            summary = await generateRouteSummary({
+              name: walk.name,
+              distance: walk.distance,
+              duration: walk.duration,
+              elevationGain: walk.elevationGain,
+              elevationLoss: walk.elevationLoss,
+              date: walk.date,
+            });
+            summaryCount++;
+            // Clear the line and show success
+            process.stdout.write("\r");
+          } catch (error) {
+            // Clear the line
+            process.stdout.write("\r");
+            console.log(
+              `   ⚠️  ${fileName.padEnd(40)} Summary generation failed`,
+            );
+          }
+        }
+
+        // Insert walk with summary
+        insertWalk({ ...walk, summary });
         successCount++;
 
         const originalCount = walk.coordinatesFull.length;
@@ -335,8 +591,9 @@ async function main() {
           walk.coordinatesSimplified,
         );
 
+        const summaryIndicator = summary ? "✨" : "  ";
         console.log(
-          `   ✅ ${fileName.padEnd(40)} ${originalCount.toString().padStart(5)} → ${simplifiedCount.toString().padStart(4)} pts (${reduction.toFixed(1)}% reduction)`,
+          `   ✅ ${fileName.padEnd(40)} ${originalCount.toString().padStart(5)} → ${simplifiedCount.toString().padStart(4)} pts (${reduction.toFixed(1)}% reduction) ${summaryIndicator}`,
         );
       } else {
         errorCount++;
@@ -351,15 +608,18 @@ async function main() {
   // Summary
   console.log("\n==========================");
   console.log("📈 Summary:");
-  console.log(`   Total files:     ${gpxFiles.length}`);
+  console.log(`   Files processed: ${filesToProcess.length}`);
   console.log(`   Successful:      ${successCount}`);
   console.log(`   Failed:          ${errorCount}`);
+  console.log(`   AI summaries:    ${summaryCount}`);
   console.log(`   Original points: ${totalOriginalPoints.toLocaleString()}`);
   console.log(`   Simplified:      ${totalSimplifiedPoints.toLocaleString()}`);
-  console.log(
-    `   Overall reduction: ${((1 - totalSimplifiedPoints / totalOriginalPoints) * 100).toFixed(1)}%`,
-  );
-  console.log(`\n   Database entries: ${getWalkCount()}`);
+  if (totalOriginalPoints > 0) {
+    console.log(
+      `   Overall reduction: ${((1 - totalSimplifiedPoints / totalOriginalPoints) * 100).toFixed(1)}%`,
+    );
+  }
+  console.log(`\n   Total database entries: ${getWalkCount()}`);
   console.log("\n✨ Preprocessing complete!\n");
 
   // Close database

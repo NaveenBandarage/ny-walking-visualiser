@@ -137,6 +137,20 @@ export function formatDate(date: Date): string {
 }
 
 /**
+ * Format walk name for display
+ * Transforms "Route 2025-11-30 2:12pm" to "30-11-2025 2:12pm"
+ */
+export function formatWalkName(name: string): string {
+  // Match pattern: "Route YYYY-MM-DD H:MMam/pm" or similar variations
+  const match = name.match(/Route\s+(\d{4})-(\d{2})-(\d{2})\s+(.+)/i);
+  if (match) {
+    const [, year, month, day, time] = match;
+    return `${day}-${month}-${year} ${time}`;
+  }
+  return name;
+}
+
+/**
  * Generate a unique ID
  */
 export function generateId(): string {

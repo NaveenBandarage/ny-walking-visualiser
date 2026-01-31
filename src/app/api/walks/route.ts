@@ -17,6 +17,7 @@ function transformWalk(row: WalkRow) {
     id: row.id,
     name: row.name,
     description: row.description,
+    summary: row.summary,
     date: row.date,
     distance: row.distance_km,
     duration: row.duration_minutes,

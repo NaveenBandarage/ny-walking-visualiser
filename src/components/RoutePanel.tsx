@@ -2,7 +2,12 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { Walk } from "@/lib/types";
-import { formatDistance, formatDuration, formatDate } from "@/lib/utils";
+import {
+  formatDistance,
+  formatDuration,
+  formatDate,
+  formatWalkName,
+} from "@/lib/utils";
 
 interface RoutePanelProps {
   walk: Walk | null;
@@ -41,7 +46,7 @@ export default function RoutePanel({ walk, onClose }: RoutePanelProps) {
 
             {/* Walk name */}
             <h2 className="text-base font-medium text-white pr-6 mb-1">
-              {walk.name}
+              {formatWalkName(walk.name)}
             </h2>
 
             {/* Date */}
@@ -74,19 +79,19 @@ export default function RoutePanel({ walk, onClose }: RoutePanelProps) {
               </p>
             )}
 
-            {/* Route preview - color indicator */}
+            {/* Route summary or fallback */}
             <div className="mt-4 pt-4 border-t border-white/10">
-              <div className="flex items-center gap-2">
+              <div className="flex items-start gap-2">
                 <div
-                  className="w-3 h-3 rounded-full"
+                  className="w-3 h-3 rounded-full shrink-0 mt-0.5"
                   style={{
                     backgroundColor: walk.color
                       ? `rgba(${walk.color[0]}, ${walk.color[1]}, ${walk.color[2]}, 1)`
                       : "white",
                   }}
                 />
-                <span className="text-xs text-white/40 font-mono">
-                  {walk.coordinates.length} points
+                <span className="text-xs text-white/60 leading-relaxed">
+                  {walk.summary || `${walk.coordinates.length} points`}
                 </span>
               </div>
             </div>

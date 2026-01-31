@@ -7,7 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "preprocess": "tsx scripts/preprocess-gpx.ts"
+    "preprocess": "tsx scripts/preprocess-gpx.ts",
+    "preprocess:status": "tsx scripts/preprocess-gpx.ts --status",
+    "preprocess:summaries": "tsx scripts/preprocess-gpx.ts --summaries",
+    "preprocess:force": "tsx scripts/preprocess-gpx.ts --force",
+    "test-ollama": "tsx scripts/test-ollama-summary.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.2.6",
