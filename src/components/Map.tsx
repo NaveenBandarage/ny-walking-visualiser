@@ -65,6 +65,25 @@ function heartbeatCurve(t: number): number {
   }
 }
 
+const MIN_SEQUENCE_DURATION_SECONDS = 2.5;
+const MAX_SEQUENCE_DURATION_SECONDS = 12;
+const SECONDS_PER_ROUTE = 0.05;
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5
+    ? 4 * t * t * t
+    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function getSequenceDurationSeconds(count: number): number {
+  if (count <= 0) return MIN_SEQUENCE_DURATION_SECONDS;
+  const duration = count * SECONDS_PER_ROUTE;
+  return Math.min(
+    MAX_SEQUENCE_DURATION_SECONDS,
+    Math.max(MIN_SEQUENCE_DURATION_SECONDS, duration),
+  );
+}
+
 // NYC centered view
 const INITIAL_VIEW_STATE: ViewState = {
   longitude: -73.985,
@@ -138,7 +157,7 @@ function getViewportBounds(
   };
 }
 
-export default function Map({
+export default function WalkMap({
   walks,
   selectedWalk,
   onWalkClick,
@@ -150,6 +169,10 @@ export default function Map({
   const [isClientReady, setIsClientReady] = useState(false);
   const [animationTime, setAnimationTime] = useState(0);
   const animationRef = useRef<number | null>(null);
+  const [revealedCount, setRevealedCount] = useState(0);
+  const [isSequencePlaying, setIsSequencePlaying] = useState(false);
+  const [hasSequencePlayed, setHasSequencePlayed] = useState(false);
+  const sequenceAnimationRef = useRef<number | null>(null);
 
   // Determine if we should use high detail based on zoom level
   const useHighDetail = viewState.zoom >= HIGH_DETAIL_ZOOM;
@@ -167,6 +190,27 @@ export default function Map({
 
     return walks.filter((walk) => isWalkInViewport(walk, viewportBounds));
   }, [walks, viewportBounds, viewState.zoom]);
+
+  const walkOrderIndex = useMemo(() => {
+    return new Map(walks.map((walk, index) => [walk.id, index]));
+  }, [walks]);
+
+  const animatedVisibleWalks = useMemo(() => {
+    if (revealedCount >= walks.length) return visibleWalks;
+
+    const limit = Math.max(0, Math.min(walks.length, revealedCount));
+    return visibleWalks.filter((walk) => {
+      if (selectedWalk?.id === walk.id) return true;
+      const index = walkOrderIndex.get(walk.id);
+      return index !== undefined && index < limit;
+    });
+  }, [
+    revealedCount,
+    visibleWalks,
+    walkOrderIndex,
+    walks.length,
+    selectedWalk?.id,
+  ]);
 
   // Heartbeat animation for selected route
   useEffect(() => {
@@ -189,6 +233,64 @@ export default function Map({
       setAnimationTime(0);
     }
   }, [selectedWalk]);
+
+  const startSequence = useCallback(() => {
+    if (walks.length === 0) return;
+
+    if (sequenceAnimationRef.current) {
+      cancelAnimationFrame(sequenceAnimationRef.current);
+    }
+
+    const total = walks.length;
+    const durationSeconds = getSequenceDurationSeconds(total);
+    const startTime = performance.now();
+
+    setIsSequencePlaying(true);
+    setHasSequencePlayed(true);
+    setRevealedCount(0);
+
+    const animate = (currentTime: number) => {
+      const elapsedSeconds = (currentTime - startTime) / 1000;
+      const rawProgress = Math.min(1, elapsedSeconds / durationSeconds);
+      const easedProgress = easeInOutCubic(rawProgress);
+      const nextCount = Math.max(
+        0,
+        Math.min(total, Math.floor(easedProgress * total)),
+      );
+
+      setRevealedCount((prev) => (prev === nextCount ? prev : nextCount));
+
+      if (rawProgress < 1) {
+        sequenceAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        setIsSequencePlaying(false);
+        setRevealedCount(total);
+      }
+    };
+
+    sequenceAnimationRef.current = requestAnimationFrame(animate);
+  }, [walks.length]);
+
+  useEffect(() => {
+    if (walks.length === 0) {
+      setRevealedCount(0);
+      return;
+    }
+
+    if (!hasSequencePlayed) {
+      startSequence();
+    } else if (!isSequencePlaying) {
+      setRevealedCount(walks.length);
+    }
+  }, [walks.length, hasSequencePlayed, isSequencePlaying, startSequence]);
+
+  useEffect(() => {
+    return () => {
+      if (sequenceAnimationRef.current) {
+        cancelAnimationFrame(sequenceAnimationRef.current);
+      }
+    };
+  }, []);
 
   // Ensure we're fully mounted on client before initializing WebGL
   useEffect(() => {
@@ -313,10 +415,10 @@ export default function Map({
             }),
           ]
         : []),
-      // Main walks layer - uses viewport-culled walks
+      // Main walks layer - uses viewport-culled + sequence-animated walks
       new PathLayer<WalkWithLOD>({
         id: "walks-layer",
-        data: visibleWalks,
+        data: animatedVisibleWalks,
         getPath: (d) => getWalkCoordinates(d),
         getColor: (d) => {
           // Highlight selected walk with vibrant color
@@ -363,12 +465,12 @@ export default function Map({
         updateTriggers: {
           getColor: [selectedWalk?.id, hoveredWalkId],
           getWidth: [selectedWalk?.id, hoveredWalkId],
-          getPath: [useHighDetail],
+          getPath: [useHighDetail, revealedCount],
         },
       }),
     ],
     [
-      visibleWalks,
+      animatedVisibleWalks,
       selectedWalk,
       hoveredWalkId,
       animationTime,
@@ -378,6 +480,7 @@ export default function Map({
       heartbeat,
       getWalkCoordinates,
       useHighDetail,
+      revealedCount,
     ],
   );
 
@@ -394,7 +497,7 @@ export default function Map({
       if (coordinate) {
         // Find all walks that overlap at this point
         const overlapping = findOverlappingWalks(
-          visibleWalks,
+          animatedVisibleWalks,
           clickedWalk,
           coordinate,
         );
@@ -417,7 +520,7 @@ export default function Map({
         ]);
       }
     },
-    [visibleWalks, onWalkClick, onMapClick],
+    [animatedVisibleWalks, onWalkClick, onMapClick],
   );
 
   const handleHover = useCallback((info: PickingInfo<WalkWithLOD>) => {
@@ -564,6 +667,42 @@ export default function Map({
 
   return (
     <div className="h-full w-full relative">
+      <div className="absolute left-4 top-1/2 -translate-y-1/2 z-10 pointer-events-auto">
+        <button
+          type="button"
+          onClick={startSequence}
+          disabled={isSequencePlaying || walks.length === 0}
+          className={`panel-glass flex items-center gap-2 px-3 py-2 text-xs font-mono uppercase tracking-wider transition ${
+            isSequencePlaying || walks.length === 0
+              ? "text-white/30 border-white/10 cursor-not-allowed"
+              : "text-white/70 hover:text-white hover:border-white/30"
+          }`}
+          aria-label={
+            isSequencePlaying
+              ? "Playing route sequence"
+              : hasSequencePlayed
+                ? "Replay route sequence"
+                : "Play route sequence"
+          }
+        >
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 12 12"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d="M3 2.5L10 6L3 9.5V2.5Z" />
+          </svg>
+          <span>
+            {isSequencePlaying
+              ? "Playing"
+              : hasSequencePlayed
+                ? "Replay"
+                : "Play"}
+          </span>
+        </button>
+      </div>
       <DeckGL
         viewState={viewState}
         onViewStateChange={({ viewState: vs }) => setViewState(vs as ViewState)}
