@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import MapGL, { MapRef } from "react-map-gl/mapbox";
 import { DeckGL } from "@deck.gl/react";
-import { PathLayer } from "@deck.gl/layers";
+import { PathLayer, ScatterplotLayer } from "@deck.gl/layers";
 import type { PickingInfo } from "@deck.gl/core";
 import { ViewState, PickedWalk, WalkPoint } from "@/lib/types";
 
@@ -34,35 +34,63 @@ interface WalkWithLOD {
   };
 }
 
-// Vibrant selected route color (cyan/teal)
-const SELECTED_COLOR: [number, number, number, number] = [0, 255, 220, 255];
-const SELECTED_GLOW_COLOR: [number, number, number] = [0, 255, 220];
-
 // Zoom level threshold for LOD
 const HIGH_DETAIL_ZOOM = 14;
 
-// Heartbeat animation curve - sharp spikes followed by rest
-function heartbeatCurve(t: number): number {
-  // t is 0-1, representing one full heartbeat cycle
-  // Creates a double-beat pattern like a real heartbeat (lub-dub)
+// Selection marker travel duration (seconds)
+const MARKER_TRAVEL_DURATION = 8;
 
-  if (t < 0.1) {
-    // First beat (lub) - sharp spike up
-    const progress = t / 0.1;
-    return Math.sin(progress * Math.PI) * 1.0;
-  } else if (t < 0.15) {
-    // Quick dip
-    const progress = (t - 0.1) / 0.05;
-    return -0.2 * Math.sin(progress * Math.PI);
-  } else if (t < 0.25) {
-    // Second beat (dub) - smaller spike
-    const progress = (t - 0.15) / 0.1;
-    return Math.sin(progress * Math.PI) * 0.6;
-  } else {
-    // Rest period - flat baseline with subtle decay
-    const progress = (t - 0.25) / 0.75;
-    return Math.max(0, 0.1 * (1 - progress));
+function buildPathMetrics(
+  coordinates: [number, number][],
+): {
+  coordinates: [number, number][];
+  cumulativeLengths: number[];
+  totalLength: number;
+} | null {
+  if (coordinates.length < 2) return null;
+
+  const cumulativeLengths = [0];
+  let totalLength = 0;
+
+  for (let i = 1; i < coordinates.length; i++) {
+    const [lng0, lat0] = coordinates[i - 1];
+    const [lng1, lat1] = coordinates[i];
+    const segmentLength = Math.hypot(lng1 - lng0, lat1 - lat0);
+    totalLength += segmentLength;
+    cumulativeLengths.push(totalLength);
   }
+
+  if (totalLength === 0) return null;
+
+  return { coordinates, cumulativeLengths, totalLength };
+}
+
+function getPositionAtProgress(
+  metrics: {
+    coordinates: [number, number][];
+    cumulativeLengths: number[];
+    totalLength: number;
+  },
+  progress: number,
+): [number, number] {
+  const target = metrics.totalLength * progress;
+
+  for (let i = 1; i < metrics.cumulativeLengths.length; i++) {
+    const segmentEnd = metrics.cumulativeLengths[i];
+    if (segmentEnd >= target) {
+      const segmentStart = metrics.cumulativeLengths[i - 1];
+      const segmentLength = Math.max(0.000001, segmentEnd - segmentStart);
+      const segmentProgress = (target - segmentStart) / segmentLength;
+      const [lng0, lat0] = metrics.coordinates[i - 1];
+      const [lng1, lat1] = metrics.coordinates[i];
+      return [
+        lng0 + (lng1 - lng0) * segmentProgress,
+        lat0 + (lat1 - lat0) * segmentProgress,
+      ];
+    }
+  }
+
+  return metrics.coordinates[metrics.coordinates.length - 1];
 }
 
 const MIN_SEQUENCE_DURATION_SECONDS = 2.5;
@@ -167,7 +195,7 @@ export default function WalkMap({
   const [viewState, setViewState] = useState<ViewState>(INITIAL_VIEW_STATE);
   const [hoveredWalkId, setHoveredWalkId] = useState<string | null>(null);
   const [isClientReady, setIsClientReady] = useState(false);
-  const [animationTime, setAnimationTime] = useState(0);
+  const [markerProgress, setMarkerProgress] = useState(0);
   const animationRef = useRef<number | null>(null);
   const [revealedCount, setRevealedCount] = useState(0);
   const [isSequencePlaying, setIsSequencePlaying] = useState(false);
@@ -212,15 +240,15 @@ export default function WalkMap({
     selectedWalk?.id,
   ]);
 
-  // Heartbeat animation for selected route
+  // Animate a subtle selection marker traveling along the path
   useEffect(() => {
     if (selectedWalk) {
       let lastTime = performance.now();
+      setMarkerProgress(0);
       const animate = (currentTime: number) => {
         const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
         lastTime = currentTime;
-        // One full heartbeat cycle every ~1.2 seconds (50 BPM - calm heartbeat)
-        setAnimationTime((t) => (t + deltaTime / 1.2) % 1);
+        setMarkerProgress((t) => (t + deltaTime / MARKER_TRAVEL_DURATION) % 1);
         animationRef.current = requestAnimationFrame(animate);
       };
       animationRef.current = requestAnimationFrame(animate);
@@ -230,7 +258,7 @@ export default function WalkMap({
         }
       };
     } else {
-      setAnimationTime(0);
+      setMarkerProgress(0);
     }
   }, [selectedWalk]);
 
@@ -311,14 +339,20 @@ export default function WalkMap({
       });
   }, []);
 
-  // Calculate heartbeat pulse values for animation
-  const heartbeat = heartbeatCurve(animationTime);
-  // Opacity pulses with heartbeat - baseline 0.4, peaks at 1.0
-  const pulseOpacity = 0.4 + heartbeat * 0.6;
-  // Width pulses with heartbeat - baseline 8, peaks at 18
-  const pulseWidth = 8 + heartbeat * 10;
-  // Glow intensity for outer layers
-  const glowIntensity = 30 + heartbeat * 40;
+  const selectedPathMetrics = useMemo(() => {
+    if (!selectedWalk) return null;
+    const coords = selectedWalk.coordinatesFull || selectedWalk.coordinates;
+    return buildPathMetrics(coords);
+  }, [
+    selectedWalk?.id,
+    selectedWalk?.coordinatesFull?.length,
+    selectedWalk?.coordinates.length,
+  ]);
+
+  const markerPosition = useMemo(() => {
+    if (!selectedPathMetrics) return null;
+    return getPositionAtProgress(selectedPathMetrics, markerProgress);
+  }, [selectedPathMetrics, markerProgress]);
 
   // Get coordinates for a walk, using full coordinates when available and appropriate
   const getWalkCoordinates = useCallback(
@@ -340,108 +374,57 @@ export default function WalkMap({
     [selectedWalk?.id, useHighDetail],
   );
 
-  // Create the path layers with glow and pulse effects
-  const layers = useMemo(
-    () => [
-      // Outer glow layer for selected route (widest, pulses with heartbeat)
-      ...(selectedWalk
-        ? [
-            new PathLayer<WalkWithLOD>({
-              id: "selected-glow-outer",
-              data: [selectedWalk],
-              getPath: (d) => getWalkCoordinates(d, true),
-              getColor: [...SELECTED_GLOW_COLOR, Math.round(glowIntensity)] as [
-                number,
-                number,
-                number,
-                number,
-              ],
-              getWidth: 20 + heartbeat * 8,
-              widthUnits: "pixels",
-              widthMinPixels: 16,
-              widthMaxPixels: 40,
-              pickable: false,
-              capRounded: true,
-              jointRounded: true,
-              updateTriggers: {
-                getColor: [animationTime],
-                getWidth: [animationTime],
-                getPath: [selectedWalk?.coordinatesFull?.length],
-              },
-            }),
-            // Middle glow layer - pulses with heartbeat
-            new PathLayer<WalkWithLOD>({
-              id: "selected-glow-middle",
-              data: [selectedWalk],
-              getPath: (d) => getWalkCoordinates(d, true),
-              getColor: [
-                ...SELECTED_GLOW_COLOR,
-                Math.round(50 + heartbeat * 50),
-              ] as [number, number, number, number],
-              getWidth: 12 + heartbeat * 4,
-              widthUnits: "pixels",
-              widthMinPixels: 10,
-              widthMaxPixels: 24,
-              pickable: false,
-              capRounded: true,
-              jointRounded: true,
-              updateTriggers: {
-                getColor: [animationTime],
-                getWidth: [animationTime],
-                getPath: [selectedWalk?.coordinatesFull?.length],
-              },
-            }),
-            // Inner pulsing glow layer - main heartbeat effect
-            new PathLayer<WalkWithLOD>({
-              id: "selected-pulse",
-              data: [selectedWalk],
-              getPath: (d) => getWalkCoordinates(d, true),
-              getColor: [
-                ...SELECTED_GLOW_COLOR,
-                Math.round(pulseOpacity * 255),
-              ] as [number, number, number, number],
-              getWidth: pulseWidth,
-              widthUnits: "pixels",
-              widthMinPixels: 6,
-              widthMaxPixels: 22,
-              pickable: false,
-              capRounded: true,
-              jointRounded: true,
-              updateTriggers: {
-                getColor: [animationTime],
-                getWidth: [animationTime],
-                getPath: [selectedWalk?.coordinatesFull?.length],
-              },
-            }),
-          ]
-        : []),
+  // Create the path layers with a subtle selection marker
+  const layers = useMemo(() => {
+    const baseLayers = [
       // Main walks layer - uses viewport-culled + sequence-animated walks
       new PathLayer<WalkWithLOD>({
         id: "walks-layer",
         data: animatedVisibleWalks,
         getPath: (d) => getWalkCoordinates(d),
         getColor: (d) => {
-          // Highlight selected walk with vibrant color
+          const baseColor = d.color || [255, 255, 255, 150];
+          // Highlight selected walk using its original color
           if (selectedWalk?.id === d.id) {
-            return SELECTED_COLOR;
+            return [
+              baseColor[0],
+              baseColor[1],
+              baseColor[2],
+              Math.max(baseColor[3], 230),
+            ];
           }
           // Dim other routes when one is selected
           if (selectedWalk) {
             if (hoveredWalkId === d.id) {
-              return [255, 255, 255, 100];
+              return [
+                baseColor[0],
+                baseColor[1],
+                baseColor[2],
+                Math.max(90, Math.round(baseColor[3] * 0.6)),
+              ];
             }
             // Significantly dim non-selected routes
-            return [100, 100, 100, 60];
+            return [
+              baseColor[0],
+              baseColor[1],
+              baseColor[2],
+              Math.max(50, Math.round(baseColor[3] * 0.35)),
+            ];
           }
           // Normal state (no selection)
           if (hoveredWalkId === d.id) {
-            return [255, 255, 255, 220];
+            return [
+              baseColor[0],
+              baseColor[1],
+              baseColor[2],
+              Math.max(200, baseColor[3]),
+            ];
           }
-          return d.color || [255, 255, 255, 150];
+          return baseColor;
         },
         getWidth: (d) => {
           if (selectedWalk?.id === d.id) {
-            return 5;
+            return 4.5;
           }
           if (hoveredWalkId === d.id) {
             return 3;
@@ -468,21 +451,48 @@ export default function WalkMap({
           getPath: [useHighDetail, revealedCount],
         },
       }),
-    ],
-    [
-      animatedVisibleWalks,
-      selectedWalk,
-      hoveredWalkId,
-      animationTime,
-      pulseOpacity,
-      pulseWidth,
-      glowIntensity,
-      heartbeat,
-      getWalkCoordinates,
-      useHighDetail,
-      revealedCount,
-    ],
-  );
+    ];
+
+    if (selectedWalk && markerPosition) {
+      const baseColor = selectedWalk.color || [255, 255, 255, 180];
+      baseLayers.push(
+        new ScatterplotLayer({
+          id: "selected-marker",
+          data: [{ position: markerPosition }],
+          getPosition: (d: { position: [number, number] }) => d.position,
+          getFillColor: [
+            baseColor[0],
+            baseColor[1],
+            baseColor[2],
+            255,
+          ],
+          getLineColor: [0, 0, 0, 160],
+          stroked: true,
+          lineWidthUnits: "pixels",
+          lineWidthMinPixels: 1,
+          lineWidthMaxPixels: 2,
+          getRadius: 5,
+          radiusUnits: "pixels",
+          radiusMinPixels: 3,
+          radiusMaxPixels: 7,
+          pickable: false,
+          updateTriggers: {
+            getPosition: [markerPosition[0], markerPosition[1]],
+          },
+        }),
+      );
+    }
+
+    return baseLayers;
+  }, [
+    animatedVisibleWalks,
+    selectedWalk,
+    hoveredWalkId,
+    getWalkCoordinates,
+    useHighDetail,
+    revealedCount,
+    markerPosition,
+  ]);
 
   const handleClick = useCallback(
     (info: PickingInfo<WalkWithLOD>) => {
