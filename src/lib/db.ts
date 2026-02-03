@@ -31,6 +31,9 @@ function initializeSchema() {
       name TEXT NOT NULL,
       description TEXT,
       summary TEXT,
+      neighborhood TEXT,
+      borough TEXT,
+      area_name TEXT,
       date TEXT NOT NULL,
       distance_km REAL NOT NULL,
       duration_minutes REAL NOT NULL,
@@ -54,6 +57,25 @@ function initializeSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_walks_date ON walks (date);
   `);
+
+  ensureWalkColumns(database);
+}
+
+function ensureWalkColumns(database: Database.Database) {
+  const columns = database
+    .prepare(`PRAGMA table_info(walks)`)
+    .all() as { name: string }[];
+  const columnSet = new Set(columns.map((c) => c.name));
+
+  const ensureColumn = (name: string, type: string) => {
+    if (!columnSet.has(name)) {
+      database.exec(`ALTER TABLE walks ADD COLUMN ${name} ${type}`);
+    }
+  };
+
+  ensureColumn("neighborhood", "TEXT");
+  ensureColumn("borough", "TEXT");
+  ensureColumn("area_name", "TEXT");
 }
 
 /**
@@ -64,6 +86,9 @@ export interface WalkRow {
   name: string;
   description: string | null;
   summary: string | null;
+  neighborhood: string | null;
+  borough: string | null;
+  area_name: string | null;
   date: string;
   distance_km: number;
   duration_minutes: number;
@@ -88,6 +113,9 @@ export function insertWalk(walk: {
   name: string;
   description?: string;
   summary?: string;
+  neighborhood?: string;
+  borough?: string;
+  areaName?: string;
   date: Date;
   distance: number;
   duration: number;
@@ -124,12 +152,12 @@ export function insertWalk(walk: {
 
   const stmt = database.prepare(`
     INSERT OR REPLACE INTO walks (
-      id, name, description, summary, date, distance_km, duration_minutes,
+      id, name, description, summary, neighborhood, borough, area_name, date, distance_km, duration_minutes,
       elevation_gain, elevation_loss, coordinates_simplified, coordinates_full,
       points, color, bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat,
       source_file
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `);
 
@@ -138,6 +166,9 @@ export function insertWalk(walk: {
     walk.name,
     walk.description || null,
     walk.summary || null,
+    walk.neighborhood || null,
+    walk.borough || null,
+    walk.areaName || null,
     walk.date.toISOString(),
     walk.distance,
     walk.duration,
@@ -162,7 +193,7 @@ export function getAllWalksSimplified(): WalkRow[] {
   const database = getDb();
   return database
     .prepare(
-      `SELECT id, name, description, summary, date, distance_km, duration_minutes,
+      `SELECT id, name, description, summary, neighborhood, borough, area_name, date, distance_km, duration_minutes,
               elevation_gain, elevation_loss, coordinates_simplified, color,
               bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat
        FROM walks
@@ -183,7 +214,7 @@ export function getWalksInBounds(
   const database = getDb();
   return database
     .prepare(
-      `SELECT id, name, description, summary, date, distance_km, duration_minutes,
+      `SELECT id, name, description, summary, neighborhood, borough, area_name, date, distance_km, duration_minutes,
               elevation_gain, elevation_loss, coordinates_simplified, color,
               bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat
        FROM walks
@@ -307,6 +338,35 @@ export function getWalksWithoutSummary(): {
 }
 
 /**
+ * Get walks that are missing area data
+ */
+export function getWalksWithoutArea(): {
+  id: string;
+  source_file: string | null;
+  bounds_min_lng: number;
+  bounds_max_lng: number;
+  bounds_min_lat: number;
+  bounds_max_lat: number;
+}[] {
+  const database = getDb();
+  return database
+    .prepare(
+      `SELECT id, source_file, bounds_min_lng, bounds_max_lng, bounds_min_lat, bounds_max_lat
+       FROM walks
+       WHERE area_name IS NULL OR area_name = ''
+       ORDER BY date DESC`,
+    )
+    .all() as {
+    id: string;
+    source_file: string | null;
+    bounds_min_lng: number;
+    bounds_max_lng: number;
+    bounds_min_lat: number;
+    bounds_max_lat: number;
+  }[];
+}
+
+/**
  * Update just the summary for a walk
  */
 export function updateWalkSummary(id: string, summary: string): void {
@@ -314,6 +374,28 @@ export function updateWalkSummary(id: string, summary: string): void {
   database
     .prepare(`UPDATE walks SET summary = ? WHERE id = ?`)
     .run(summary, id);
+}
+
+/**
+ * Update just the area fields for a walk
+ */
+export function updateWalkArea(
+  id: string,
+  area: { neighborhood?: string; borough?: string; areaName?: string },
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `UPDATE walks 
+       SET neighborhood = ?, borough = ?, area_name = ?
+       WHERE id = ?`,
+    )
+    .run(
+      area.neighborhood || null,
+      area.borough || null,
+      area.areaName || null,
+      id,
+    );
 }
 
 /**

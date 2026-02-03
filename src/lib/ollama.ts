@@ -5,14 +5,7 @@
  * using a local Ollama instance.
  */
 
-// Configuration getters - read at runtime to support dynamic loading
-function getOllamaUrl(): string {
-  return process.env.OLLAMA_URL || "http://localhost:11434";
-}
-
-function getOllamaModel(): string {
-  return process.env.OLLAMA_MODEL || "gemma3:1b";
-}
+import { getOllamaModel, getOllamaUrl } from "./ollama-config";
 
 // Export for logging purposes
 export function getOllamaConfig() {

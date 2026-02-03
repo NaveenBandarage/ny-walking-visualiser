@@ -10,6 +10,9 @@ export interface Walk {
   name: string;
   description?: string;
   summary?: string; // AI-generated summary of the route
+  neighborhood?: string;
+  borough?: string;
+  areaName?: string;
   date: Date;
   coordinates: [number, number][];
   points: WalkPoint[];

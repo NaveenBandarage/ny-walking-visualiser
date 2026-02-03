@@ -21,6 +21,9 @@ export interface WalkDataSummary {
     evening: number; // 5pm-9pm
     night: number; // 9pm-5am
   };
+  topAreas: { name: string; count: number }[];
+  totalWithArea: number;
+  totalWithoutArea: number;
   walks: {
     date: string;
     day: string;
@@ -28,6 +31,7 @@ export interface WalkDataSummary {
     distanceKm: number;
     durationMin: number;
     elevationGainM?: number;
+    areaName?: string;
   }[];
 }
 
@@ -59,6 +63,9 @@ export function prepareWalkDataForChat(walks: Walk[]): WalkDataSummary {
 
   const byMonth: Record<string, number> = {};
   const byTimeOfDay = { morning: 0, afternoon: 0, evening: 0, night: 0 };
+  const byArea: Record<string, number> = {};
+  let totalWithArea = 0;
+  let totalWithoutArea = 0;
 
   const walkDetails = walks.map((walk) => {
     const day = walk.date.toLocaleDateString("en-US", { weekday: "long" });
@@ -67,10 +74,17 @@ export function prepareWalkDataForChat(walks: Walk[]): WalkDataSummary {
       year: "numeric",
     });
     const timeOfDay = getTimeOfDay(walk.date);
+    const areaName = walk.areaName || walk.neighborhood || walk.borough;
 
     byDayOfWeek[day] = (byDayOfWeek[day] || 0) + 1;
     byMonth[month] = (byMonth[month] || 0) + 1;
     byTimeOfDay[timeOfDay as keyof typeof byTimeOfDay]++;
+    if (areaName) {
+      byArea[areaName] = (byArea[areaName] || 0) + 1;
+      totalWithArea++;
+    } else {
+      totalWithoutArea++;
+    }
 
     return {
       date: walk.date.toISOString().split("T")[0],
@@ -81,8 +95,14 @@ export function prepareWalkDataForChat(walks: Walk[]): WalkDataSummary {
       elevationGainM: walk.elevationGain
         ? Math.round(walk.elevationGain)
         : undefined,
+      areaName: areaName || undefined,
     };
   });
+
+  const topAreas = Object.entries(byArea)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([name, count]) => ({ name, count }));
 
   return {
     stats: {
@@ -99,6 +119,9 @@ export function prepareWalkDataForChat(walks: Walk[]): WalkDataSummary {
     byDayOfWeek,
     byMonth,
     byTimeOfDay,
+    topAreas,
+    totalWithArea,
+    totalWithoutArea,
     walks: walkDetails.sort(
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
     ),
@@ -108,13 +131,19 @@ export function prepareWalkDataForChat(walks: Walk[]): WalkDataSummary {
 /**
  * Build system prompt for Ollama with walk data context
  */
-export function buildChatSystemPrompt(walkData: WalkDataSummary): string {
+export function buildChatSystemPrompt(
+  walkData: WalkDataSummary,
+  retrievedContext?: string,
+): string {
   return `You are a helpful assistant that answers questions about the user's walking history. You have access to their complete walking data.
 
 IMPORTANT INSTRUCTIONS:
 - Answer questions directly and concisely
 - Use the data provided to give accurate answers
 - When asked about counts, distances, or durations, calculate from the data
+- Use WALKING DATA SUMMARY for aggregates and overall trends
+- Use RETRIEVED WALKS for specific, walk-level questions
+- If a question requires neighborhood or area names and they are not in the data, say so and ask a follow-up question
 - Format numbers nicely (e.g., "3.2 km" not "3.234523 km")
 - Be conversational but brief
 
@@ -135,20 +164,31 @@ WALKS BY TIME OF DAY:
 - Evening (5pm-9pm): ${walkData.byTimeOfDay.evening}
 - Night (9pm-5am): ${walkData.byTimeOfDay.night}
 
+WALKS BY AREA (top 12):
+${walkData.topAreas.length > 0
+  ? walkData.topAreas
+      .map((area) => `- ${area.name}: ${area.count}`)
+      .join("\n")
+  : "- (none)"}
+${walkData.totalWithoutArea > 0 ? `\n- Unknown area: ${walkData.totalWithoutArea}` : ""}
+
 WALKS BY MONTH:
 ${Object.entries(walkData.byMonth)
   .map(([month, count]) => `- ${month}: ${count}`)
   .join("\n")}
 
-INDIVIDUAL WALKS (most recent first):
+RETRIEVED WALKS (semantic matches):
+${retrievedContext?.trim() ? retrievedContext : "- (none)"}
+
+RECENT WALKS (most recent first):
 ${walkData.walks
-  .slice(0, 50) // Limit to most recent 50 to keep context manageable
+  .slice(0, 20) // Limit to most recent 20 to keep context manageable
   .map(
     (w) =>
-      `- ${w.date} (${w.day}, ${w.timeOfDay}): ${w.distanceKm}km, ${w.durationMin}min${w.elevationGainM ? `, +${w.elevationGainM}m elevation` : ""}`,
+      `- ${w.date} (${w.day}, ${w.timeOfDay}${w.areaName ? `, ${w.areaName}` : ""}): ${w.distanceKm}km, ${w.durationMin}min${w.elevationGainM ? `, +${w.elevationGainM}m elevation` : ""}`,
   )
   .join("\n")}
-${walkData.walks.length > 50 ? `\n... and ${walkData.walks.length - 50} more walks` : ""}`;
+${walkData.walks.length > 20 ? `\n... and ${walkData.walks.length - 20} more walks` : ""}`;
 }
 
 /**
@@ -156,6 +196,7 @@ ${walkData.walks.length > 50 ? `\n... and ${walkData.walks.length - 50} more wal
  */
 export const SUGGESTED_QUESTIONS = [
   "How many walks have I done on Saturday?",
+  "Which area of NYC do I walk in most?",
   "What was my longest walk?",
   "When do I walk the most - morning or evening?",
   "How many km did I walk this month?",

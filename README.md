@@ -29,14 +29,46 @@ NEXT_PUBLIC_MAPBOX_TOKEN=pk.your_mapbox_token_here
 
 Get a free token at [mapbox.com](https://mapbox.com)
 
-### 3. Add your GPX files
+### 3. Configure Ollama + Qdrant (for chat)
+
+Set these in `.env.local`:
+
+```
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=gemma3:1b
+OLLAMA_EMBED_MODEL=nomic-embed-text
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION=walks
+```
+
+If Qdrant requires auth, also set `QDRANT_API_KEY`.
+For Mapbox area lookups during preprocessing, set `MAPBOX_TOKEN` or reuse `NEXT_PUBLIC_MAPBOX_TOKEN`.
+If you need to start Qdrant locally, a simple Docker run is:
+
+```
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+### 4. Add your GPX files
 
 Place your GPX files in the `public/gpx/` directory. The app will automatically load and display them.
 
-### 4. Run the development server
+### 5. Index vectors (for chat)
+
+```
+npm run index:qdrant
+```
+
+### 6. Run the development server
 
 ```bash
 npm run dev
+```
+
+Optional: backfill area names without rebuilding everything:
+
+```
+npm run preprocess:areas
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to see your walks visualized.

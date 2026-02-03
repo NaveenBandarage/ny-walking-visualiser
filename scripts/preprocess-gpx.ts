@@ -19,7 +19,9 @@ import {
   getWalkCount,
   getProcessedSourceFiles,
   getWalksWithoutSummary,
+  getWalksWithoutArea,
   updateWalkSummary,
+  updateWalkArea,
   getWalkBySourceFile,
 } from "../src/lib/db";
 import { simplifyPath, getSimplificationRatio } from "../src/lib/simplify";
@@ -28,6 +30,7 @@ import {
   generateRouteSummary,
   getOllamaConfig,
 } from "../src/lib/ollama";
+import { getMapboxToken, reverseGeocodeArea } from "../src/lib/mapbox";
 
 // Parse command line arguments
 const args = process.argv.slice(2);
@@ -35,6 +38,7 @@ const forceRebuild = args.includes("--force") || args.includes("-f");
 const statusOnly = args.includes("--status") || args.includes("-s");
 const summariesOnly =
   args.includes("--summaries") || args.includes("--generate-summaries");
+const areasOnly = args.includes("--areas") || args.includes("--geocode");
 
 // Types
 interface WalkPoint {
@@ -140,6 +144,28 @@ function calculateElevation(points: WalkPoint[]): {
 function estimateDuration(distanceKm: number): number {
   const avgSpeedKmH = 5;
   return (distanceKm / avgSpeedKmH) * 60; // Return minutes
+}
+
+function getCenterFromCoordinates(
+  coordinates: [number, number][],
+): { lat: number; lng: number } | null {
+  if (coordinates.length === 0) return null;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+
+  for (const [lng, lat] of coordinates) {
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+  }
+
+  return {
+    lat: (minLat + maxLat) / 2,
+    lng: (minLng + maxLng) / 2,
+  };
 }
 
 /**
@@ -323,6 +349,11 @@ function showStatus(gpxFiles: string[], processedFiles: string[]) {
     console.log(`   Missing AI summaries: ${walksWithoutSummary.length}`);
   }
 
+  const walksWithoutArea = getWalksWithoutArea();
+  if (walksWithoutArea.length > 0) {
+    console.log(`   Missing area data:    ${walksWithoutArea.length}`);
+  }
+
   if (unprocessed.length > 0) {
     console.log("\n📭 Unprocessed files:");
     unprocessed.slice(0, 20).forEach((f) => console.log(`   - ${f}`));
@@ -341,8 +372,12 @@ function showStatus(gpxFiles: string[], processedFiles: string[]) {
     }
   }
 
-  if (unprocessed.length === 0 && walksWithoutSummary.length === 0) {
-    console.log("\n✅ All files are fully processed with AI summaries!");
+  if (
+    unprocessed.length === 0 &&
+    walksWithoutSummary.length === 0 &&
+    walksWithoutArea.length === 0
+  ) {
+    console.log("\n✅ All files are fully processed with summaries and areas!");
   } else {
     console.log("\n💡 Tips:");
     if (unprocessed.length > 0) {
@@ -353,6 +388,11 @@ function showStatus(gpxFiles: string[], processedFiles: string[]) {
     if (walksWithoutSummary.length > 0) {
       console.log(
         "   Run 'npm run preprocess -- --summaries' to generate missing AI summaries",
+      );
+    }
+    if (walksWithoutArea.length > 0) {
+      console.log(
+        "   Run 'npm run preprocess -- --areas' to backfill area names",
       );
     }
     console.log(
@@ -425,17 +465,94 @@ async function generateMissingSummaries() {
 }
 
 /**
+ * Generate missing area data for existing walks
+ */
+async function generateMissingAreas() {
+  console.log("🗺️  Backfilling Walk Areas");
+  console.log("===========================\n");
+
+  const mapboxToken = getMapboxToken();
+  if (!mapboxToken) {
+    console.log("❌ Mapbox token missing.");
+    console.log("   Set MAPBOX_TOKEN or NEXT_PUBLIC_MAPBOX_TOKEN\n");
+    return;
+  }
+
+  const walksWithoutArea = getWalksWithoutArea();
+  if (walksWithoutArea.length === 0) {
+    console.log("✅ All walks already have area data!\n");
+    return;
+  }
+
+  console.log(`📂 Found ${walksWithoutArea.length} walks without area data\n`);
+
+  let successCount = 0;
+  let errorCount = 0;
+  const cache = new Map<string, Awaited<ReturnType<typeof reverseGeocodeArea>>>();
+
+  for (const walk of walksWithoutArea) {
+    const center = {
+      lat: (walk.bounds_min_lat + walk.bounds_max_lat) / 2,
+      lng: (walk.bounds_min_lng + walk.bounds_max_lng) / 2,
+    };
+    const key = `${center.lat.toFixed(5)},${center.lng.toFixed(5)}`;
+
+    try {
+      process.stdout.write(
+        `   🔄 ${(walk.source_file || walk.id).padEnd(40)} Geocoding...`,
+      );
+
+      let areaInfo = cache.get(key) || null;
+      if (!cache.has(key)) {
+        areaInfo = await reverseGeocodeArea(center.lat, center.lng);
+        cache.set(key, areaInfo);
+      }
+
+      if (areaInfo) {
+        updateWalkArea(walk.id, {
+          neighborhood: areaInfo.neighborhood,
+          borough: areaInfo.borough,
+          areaName: areaInfo.areaName,
+        });
+        successCount++;
+      } else {
+        errorCount++;
+      }
+
+      process.stdout.write("\r");
+      const status = areaInfo ? "✅" : "⚠️ ";
+      console.log(
+        `   ${status} ${(walk.source_file || walk.id).padEnd(40)} ${areaInfo?.areaName || "No area found"}`,
+      );
+    } catch (error) {
+      errorCount++;
+      process.stdout.write("\r");
+      console.log(
+        `   ❌ ${(walk.source_file || walk.id).padEnd(40)} Area lookup failed`,
+      );
+    }
+  }
+
+  console.log("\n==========================");
+  console.log("📈 Area Backfill Summary:");
+  console.log(`   Updated: ${successCount}`);
+  console.log(`   Failed:  ${errorCount}`);
+  console.log("\n✨ Area backfill complete!\n");
+}
+
+/**
  * Main preprocessing function
  */
 async function main() {
   console.log("🚀 GPX Preprocessing Script");
   console.log("==========================\n");
 
-  if (!forceRebuild && !statusOnly && !summariesOnly) {
+  if (!forceRebuild && !statusOnly && !summariesOnly && !areasOnly) {
     console.log("💡 Running in incremental mode (only new files)");
     console.log("   Use --force to rebuild everything");
     console.log("   Use --status to see what needs processing");
-    console.log("   Use --summaries to generate missing AI summaries\n");
+    console.log("   Use --summaries to generate missing AI summaries");
+    console.log("   Use --areas to backfill missing area names\n");
   }
 
   // Check if GPX directory exists
@@ -478,6 +595,13 @@ async function main() {
     return;
   }
 
+  // Areas only mode
+  if (areasOnly) {
+    await generateMissingAreas();
+    closeDb();
+    return;
+  }
+
   console.log(`📂 Found ${gpxFiles.length} GPX files\n`);
 
   // Check if Ollama is available for AI summaries
@@ -490,6 +614,17 @@ async function main() {
   } else {
     console.log("⚠️  Ollama not available - skipping AI summary generation");
     console.log("   Start Ollama with 'ollama serve' to enable summaries\n");
+  }
+
+  const mapboxToken = getMapboxToken();
+  const mapboxEnabled = Boolean(mapboxToken);
+  if (mapboxEnabled) {
+    console.log("🗺️  Mapbox geocoding enabled for walk areas");
+  } else {
+    console.log("⚠️  Mapbox token missing - area detection disabled");
+    console.log(
+      "   Set MAPBOX_TOKEN or NEXT_PUBLIC_MAPBOX_TOKEN to enable area names\n",
+    );
   }
 
   // Determine which files to process
@@ -535,6 +670,7 @@ async function main() {
   let summaryCount = 0;
   let totalOriginalPoints = 0;
   let totalSimplifiedPoints = 0;
+  const geocodeCache = new Map<string, Awaited<ReturnType<typeof reverseGeocodeArea>>>();
 
   console.log("\n📊 Processing files:\n");
 
@@ -550,6 +686,26 @@ async function main() {
       const walk = parseGPXFile(filePath, colorIndex);
 
       if (walk) {
+        let areaInfo: Awaited<ReturnType<typeof reverseGeocodeArea>> = null;
+        if (mapboxEnabled) {
+          const center = getCenterFromCoordinates(walk.coordinatesFull);
+          if (center) {
+            const key = `${center.lat.toFixed(5)},${center.lng.toFixed(5)}`;
+            if (geocodeCache.has(key)) {
+              areaInfo = geocodeCache.get(key) || null;
+            } else {
+              try {
+                areaInfo = await reverseGeocodeArea(center.lat, center.lng);
+                geocodeCache.set(key, areaInfo);
+              } catch (error) {
+                console.log(
+                  `   ⚠️  ${fileName.padEnd(40)} Area lookup failed`,
+                );
+              }
+            }
+          }
+        }
+
         // Generate AI summary if Ollama is available
         let summary: string | undefined;
         if (ollamaAvailable) {
@@ -577,8 +733,14 @@ async function main() {
           }
         }
 
-        // Insert walk with summary
-        insertWalk({ ...walk, summary });
+        // Insert walk with summary + area info
+        insertWalk({
+          ...walk,
+          summary,
+          neighborhood: areaInfo?.neighborhood,
+          borough: areaInfo?.borough,
+          areaName: areaInfo?.areaName,
+        });
         successCount++;
 
         const originalCount = walk.coordinatesFull.length;

@@ -10,8 +10,10 @@
     "preprocess": "tsx scripts/preprocess-gpx.ts",
     "preprocess:status": "tsx scripts/preprocess-gpx.ts --status",
     "preprocess:summaries": "tsx scripts/preprocess-gpx.ts --summaries",
+    "preprocess:areas": "tsx scripts/preprocess-gpx.ts --areas",
     "preprocess:force": "tsx scripts/preprocess-gpx.ts --force",
-    "test-ollama": "tsx scripts/test-ollama-summary.ts"
+    "test-ollama": "tsx scripts/test-ollama-summary.ts",
+    "index:qdrant": "tsx scripts/index-qdrant.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.2.6",

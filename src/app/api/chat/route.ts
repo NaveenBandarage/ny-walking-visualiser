@@ -1,18 +1,65 @@
 import { NextRequest } from "next/server";
-import { getAllWalksSimplified } from "@/lib/db";
+import { getAllWalksSimplified, isDatabaseReady } from "@/lib/db";
 import {
   prepareWalkDataForChat,
   buildChatSystemPrompt,
   ChatMessage,
 } from "@/lib/chat";
 import { Walk } from "@/lib/types";
+import { getEmbedding } from "@/lib/ollama-embeddings";
+import { getOllamaModel, getOllamaUrl } from "@/lib/ollama-config";
+import { QdrantPoint, searchQdrant } from "@/lib/qdrant";
 
-function getOllamaUrl(): string {
-  return process.env.OLLAMA_URL || "http://localhost:11434";
-}
+function formatRetrievedWalks(points: QdrantPoint[]): string {
+  if (points.length === 0) return "";
 
-function getOllamaModel(): string {
-  return process.env.OLLAMA_MODEL || "gemma3:1b";
+  return points
+    .map((point) => {
+      const payload = (point.payload || {}) as Record<string, unknown>;
+      const name =
+        typeof payload.name === "string" ? payload.name : "Walk";
+      const date =
+        typeof payload.date === "string"
+          ? payload.date.split("T")[0]
+          : "";
+      const day = typeof payload.day === "string" ? payload.day : "";
+      const timeOfDay =
+        typeof payload.time_of_day === "string" ? payload.time_of_day : "";
+      const area =
+        typeof payload.area_name === "string" ? payload.area_name : "";
+      const distance =
+        typeof payload.distance_km === "number"
+          ? Math.round(payload.distance_km * 100) / 100
+          : undefined;
+      const duration =
+        typeof payload.duration_min === "number"
+          ? Math.round(payload.duration_min)
+          : undefined;
+      const summary =
+        typeof payload.summary === "string" ? payload.summary : "";
+      const description =
+        typeof payload.description === "string" ? payload.description : "";
+
+      const metaParts = [date, day, timeOfDay, area].filter(Boolean);
+      const metricParts = [
+        typeof distance === "number" ? `${distance}km` : "",
+        typeof duration === "number" ? `${duration}min` : "",
+      ].filter(Boolean);
+
+      let line = `- ${name}`;
+      if (metaParts.length > 0) {
+        line += ` (${metaParts.join(", ")})`;
+      }
+      if (metricParts.length > 0) {
+        line += `: ${metricParts.join(", ")}`;
+      }
+      const notes = [summary, description].filter(Boolean).join(" ");
+      if (notes) {
+        line += ` — ${notes}`;
+      }
+      return line;
+    })
+    .join("\n");
 }
 
 export async function POST(request: NextRequest) {
@@ -27,6 +74,15 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: "Message is required" }, { status: 400 });
     }
 
+    if (!isDatabaseReady()) {
+      return Response.json(
+        {
+          error: "Database not initialized. Run 'npm run preprocess' first.",
+        },
+        { status: 400 },
+      );
+    }
+
     // Get walks from database and transform to Walk type
     const dbWalks = getAllWalksSimplified();
     const walks: Walk[] = dbWalks.map((w) => ({
@@ -34,6 +90,9 @@ export async function POST(request: NextRequest) {
       name: w.name,
       description: w.description || undefined,
       summary: w.summary || undefined,
+      neighborhood: w.neighborhood || undefined,
+      borough: w.borough || undefined,
+      areaName: w.area_name || undefined,
       date: new Date(w.date),
       distance: w.distance_km,
       duration: w.duration_minutes,
@@ -45,7 +104,15 @@ export async function POST(request: NextRequest) {
 
     // Prepare walk data summary for context
     const walkData = prepareWalkDataForChat(walks);
-    const systemPrompt = buildChatSystemPrompt(walkData);
+    let retrievedContext = "";
+    try {
+      const queryEmbedding = await getEmbedding(message);
+      const retrieved = await searchQdrant(queryEmbedding, 6);
+      retrievedContext = formatRetrievedWalks(retrieved);
+    } catch (error) {
+      console.warn("RAG retrieval failed:", error);
+    }
+    const systemPrompt = buildChatSystemPrompt(walkData, retrievedContext);
 
     // Build messages for Ollama
     const messages = [
