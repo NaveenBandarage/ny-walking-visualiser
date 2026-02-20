@@ -14,11 +14,9 @@ struct WalkMapView: View {
         )
     )
 
-    @State private var revealedCount: Int = 0
-
     var body: some View {
         Map(position: $position) {
-            ForEach(Array(walks.prefix(revealedCount).enumerated()), id: \.element.id) { _, walk in
+            ForEach(walks) { walk in
                 let style = polylineStyle(for: walk)
                 MapPolyline(coordinates: walk.coordinates)
                     .stroke(style.color, lineWidth: style.width)
@@ -32,11 +30,6 @@ struct WalkMapView: View {
         ))
         .colorScheme(.dark)
         .ignoresSafeArea()
-        .onAppear { startRevealAnimation() }
-        .onChange(of: walks) { _, newWalks in
-            revealedCount = 0
-            if !newWalks.isEmpty { startRevealAnimation() }
-        }
         .onChange(of: selectedWalk) { _, walk in
             if let walk {
                 animateToWalk(walk)
@@ -44,7 +37,10 @@ struct WalkMapView: View {
                 animateToAllWalks()
             }
         }
-        .onMapCameraChange { _ in }
+        .onChange(of: walks) { _, newWalks in
+            guard !newWalks.isEmpty, selectedWalk == nil else { return }
+            animateToAllWalks(walks: newWalks)
+        }
     }
 
     // MARK: - Polyline Styling
@@ -66,40 +62,21 @@ struct WalkMapView: View {
         }
     }
 
-    // MARK: - Animation
-
-    private func startRevealAnimation() {
-        revealedCount = 0
-        guard !walks.isEmpty else { return }
-
-        let interval = max(0.05, min(0.15, 1.5 / Double(walks.count)))
-        var count = 0
-
-        func revealNext() {
-            guard count < walks.count else { return }
-            count += 1
-            revealedCount = count
-            DispatchQueue.main.asyncAfter(deadline: .now() + interval) {
-                revealNext()
-            }
-        }
-        revealNext()
-    }
+    // MARK: - Camera
 
     private func animateToWalk(_ walk: Walk) {
         guard !walk.coordinates.isEmpty else { return }
-        let region = walk.coordinates.boundingRegion(padding: 0.15)
         withAnimation(.easeInOut(duration: 0.6)) {
-            position = .region(region)
+            position = .region(walk.coordinates.boundingRegion(padding: 0.15))
         }
     }
 
-    private func animateToAllWalks() {
-        let allCoords = walks.flatMap(\.coordinates)
+    private func animateToAllWalks(walks overrideWalks: [Walk]? = nil) {
+        let source = overrideWalks ?? walks
+        let allCoords = source.flatMap(\.coordinates)
         guard !allCoords.isEmpty else { return }
-        let region = allCoords.boundingRegion(padding: 0.1)
         withAnimation(.easeInOut(duration: 0.6)) {
-            position = .region(region)
+            position = .region(allCoords.boundingRegion(padding: 0.1))
         }
     }
 }

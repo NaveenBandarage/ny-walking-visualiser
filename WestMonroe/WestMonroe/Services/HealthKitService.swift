@@ -6,16 +6,20 @@ import CoreLocation
 final class HealthKitService {
 
     enum AuthStatus {
-        case notDetermined  // Haven't asked yet
-        case authorized     // requestAuthorization has been called; data fetch will proceed
-        case unavailable    // Device doesn't support HealthKit
+        case notDetermined
+        case authorized
+        case unavailable
     }
 
     private let store = HKHealthStore()
     private static let hasRequestedKey = "hk_has_requested_auth"
 
-    /// Max GPS points kept per walk after downsampling. Enough detail at city scale.
-    private static let maxPointsPerWalk = 500
+    /// 150 pts/walk is invisible from default city zoom and keeps MapKit well within limits.
+    private static let maxPointsPerWalk = 150
+    /// Maximum walks to load — caps total vertex count at ~22k.
+    private static let maxWalks = 150
+    /// Concurrent route fetches — avoids a memory spike from loading everything at once.
+    private static let fetchConcurrency = 10
 
     private(set) var authStatus: AuthStatus = .notDetermined
 
@@ -26,8 +30,8 @@ final class HealthKitService {
             authStatus = .unavailable
             return
         }
-        let hasRequested = UserDefaults.standard.bool(forKey: Self.hasRequestedKey)
-        authStatus = hasRequested ? .authorized : .notDetermined
+        authStatus = UserDefaults.standard.bool(forKey: Self.hasRequestedKey)
+            ? .authorized : .notDetermined
     }
 
     func requestAuthorization() async throws {
@@ -52,69 +56,60 @@ final class HealthKitService {
     func fetchWalks() async throws -> [Walk] {
         let workouts = try await fetchWalkingWorkouts()
 
-        // Fetch all routes in parallel — this is the main perf win vs serial fetching
-        let results: [(date: Date, walk: Walk?)] = try await withThrowingTaskGroup(
-            of: (Date, Walk?).self
-        ) { group in
-            for (index, workout) in workouts.enumerated() {
-                group.addTask {
-                    guard let routes = try? await self.fetchRoutes(for: workout),
-                          !routes.isEmpty else { return (workout.startDate, nil) }
+        // Process in batches to keep peak memory low
+        var allWalks: [Walk] = []
 
-                    let locations = routes.flatMap { $0 }
-                    guard locations.count >= 2 else { return (workout.startDate, nil) }
+        let batches = workouts.chunked(into: Self.fetchConcurrency)
+        for batch in batches {
+            let batchWalks = try await withThrowingTaskGroup(of: Walk?.self) { group in
+                for workout in batch {
+                    group.addTask {
+                        guard let routes = try? await self.fetchRoutes(for: workout),
+                              !routes.isEmpty else { return nil }
 
-                    let coords = self.downsample(locations.map(\.coordinate))
-                    let (gain, loss) = self.elevationStats(from: locations)
+                        let locations = routes.flatMap { $0 }
+                        guard locations.count >= 2 else { return nil }
 
-                    let walk = Walk(
-                        id: workout.uuid,
-                        startDate: workout.startDate,
-                        endDate: workout.endDate,
-                        duration: workout.duration,
-                        distance: workout.totalDistance?.doubleValue(for: .meter()) ?? 0,
-                        coordinates: coords,
-                        elevationGain: gain,
-                        elevationLoss: loss,
-                        colorIndex: index
-                    )
-                    return (workout.startDate, walk)
+                        let coords = self.downsample(locations.map(\.coordinate))
+                        let (gain, loss) = self.elevationStats(from: locations)
+
+                        return Walk(
+                            id: workout.uuid,
+                            startDate: workout.startDate,
+                            endDate: workout.endDate,
+                            duration: workout.duration,
+                            distance: workout.totalDistance?.doubleValue(for: .meter()) ?? 0,
+                            coordinates: coords,
+                            elevationGain: gain,
+                            elevationLoss: loss,
+                            colorIndex: 0  // reassigned below after sorting
+                        )
+                    }
                 }
-            }
 
-            var collected: [(Date, Walk?)] = []
-            for try await pair in group {
-                collected.append(pair)
+                var collected: [Walk] = []
+                for try await walk in group {
+                    if let w = walk { collected.append(w) }
+                }
+                return collected
             }
-            return collected
+            allWalks.append(contentsOf: batchWalks)
         }
 
-        // Sort newest-first, then re-assign colorIndex by final position for consistent colors
-        let sorted = results
-            .compactMap(\.walk)
+        // Sort newest-first, assign stable color indices
+        return allWalks
             .sorted { $0.startDate > $1.startDate }
             .enumerated()
             .map { idx, walk in
-                Walk(
-                    id: walk.id,
-                    startDate: walk.startDate,
-                    endDate: walk.endDate,
-                    duration: walk.duration,
-                    distance: walk.distance,
-                    coordinates: walk.coordinates,
-                    elevationGain: walk.elevationGain,
-                    elevationLoss: walk.elevationLoss,
-                    colorIndex: idx
-                )
+                Walk(id: walk.id, startDate: walk.startDate, endDate: walk.endDate,
+                     duration: walk.duration, distance: walk.distance,
+                     coordinates: walk.coordinates, elevationGain: walk.elevationGain,
+                     elevationLoss: walk.elevationLoss, colorIndex: idx)
             }
-
-        return sorted
     }
 
     // MARK: - Coordinate Downsampling
 
-    /// Keep every Nth point so each walk stays under maxPointsPerWalk.
-    /// Preserves first and last point exactly.
     private func downsample(_ coords: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
         guard coords.count > Self.maxPointsPerWalk else { return coords }
         let step = coords.count / Self.maxPointsPerWalk
@@ -137,15 +132,11 @@ final class HealthKitService {
             let query = HKSampleQuery(
                 sampleType: HKWorkoutType.workoutType(),
                 predicate: predicate,
-                limit: HKObjectQueryNoLimit,
+                limit: Self.maxWalks,
                 sortDescriptors: [sortDescriptor]
             ) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                let workouts = samples as? [HKWorkout] ?? []
-                continuation.resume(returning: workouts)
+                if let error { continuation.resume(throwing: error); return }
+                continuation.resume(returning: samples as? [HKWorkout] ?? [])
             }
             store.execute(query)
         }
@@ -163,7 +154,6 @@ final class HealthKitService {
 
     private func fetchRouteSamples(for workout: HKWorkout) async throws -> [HKWorkoutRoute] {
         let predicate = HKQuery.predicateForObjects(from: workout)
-
         return try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(
                 sampleType: HKSeriesType.workoutRoute(),
@@ -171,12 +161,8 @@ final class HealthKitService {
                 limit: HKObjectQueryNoLimit,
                 sortDescriptors: nil
             ) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                let routes = samples as? [HKWorkoutRoute] ?? []
-                continuation.resume(returning: routes)
+                if let error { continuation.resume(throwing: error); return }
+                continuation.resume(returning: samples as? [HKWorkoutRoute] ?? [])
             }
             store.execute(query)
         }
@@ -186,13 +172,9 @@ final class HealthKitService {
         try await withCheckedThrowingContinuation { continuation in
             var locations: [CLLocation] = []
             var didFinish = false
-
             let query = HKWorkoutRouteQuery(route: route) { _, batch, done, error in
                 if let error {
-                    if !didFinish {
-                        didFinish = true
-                        continuation.resume(throwing: error)
-                    }
+                    if !didFinish { didFinish = true; continuation.resume(throwing: error) }
                     return
                 }
                 if let batch { locations.append(contentsOf: batch) }
@@ -218,8 +200,15 @@ final class HealthKitService {
 
 enum HealthKitError: LocalizedError {
     case notAvailable
+    var errorDescription: String? { "HealthKit is not available on this device." }
+}
 
-    var errorDescription: String? {
-        "HealthKit is not available on this device."
+// MARK: - Array chunk helper
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map {
+            Array(self[$0 ..< Swift.min($0 + size, count)])
+        }
     }
 }
