@@ -57,12 +57,12 @@ struct WalkMapView: View {
     private func polylineStyle(for walk: Walk) -> PolylineStyle {
         if let selected = selectedWalk {
             if walk.id == selected.id {
-                return PolylineStyle(color: .white.opacity(0.85), width: 4)
+                return PolylineStyle(color: walk.color.opacity(0.95), width: 4)
             } else {
-                return PolylineStyle(color: .white.opacity(0.15), width: 1.5)
+                return PolylineStyle(color: walk.color.opacity(0.2), width: 1.5)
             }
         } else {
-            return PolylineStyle(color: .white.opacity(0.35), width: 2)
+            return PolylineStyle(color: walk.color.opacity(0.75), width: 2.5)
         }
     }
 

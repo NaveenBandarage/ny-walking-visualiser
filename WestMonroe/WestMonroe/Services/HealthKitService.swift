@@ -14,13 +14,13 @@ final class HealthKitService {
     private let store = HKHealthStore()
     private static let hasRequestedKey = "hk_has_requested_auth"
 
+    /// Max GPS points kept per walk after downsampling. Enough detail at city scale.
+    private static let maxPointsPerWalk = 500
+
     private(set) var authStatus: AuthStatus = .notDetermined
 
     // MARK: - Authorization
 
-    /// Sets initial state based purely on whether we've ever called requestAuthorization before.
-    /// NOTE: authorizationStatus(for:) only reflects *write* permission, so we never use it
-    /// to gate read-only access — HealthKit intentionally hides read auth status from apps.
     func checkAuthStatus() {
         guard HKHealthStore.isHealthDataAvailable() else {
             authStatus = .unavailable
@@ -42,10 +42,7 @@ final class HealthKitService {
             HKQuantityType(.distanceWalkingRunning)
         ]
 
-        // This shows the system permission sheet exactly once; subsequent calls are no-ops.
         try await store.requestAuthorization(toShare: [], read: typesToRead)
-
-        // Mark that we've requested so we skip the prompt on next launch.
         UserDefaults.standard.set(true, forKey: Self.hasRequestedKey)
         authStatus = .authorized
     }
@@ -54,32 +51,80 @@ final class HealthKitService {
 
     func fetchWalks() async throws -> [Walk] {
         let workouts = try await fetchWalkingWorkouts()
-        var walks: [Walk] = []
 
-        for workout in workouts {
-            guard let routes = try? await fetchRoutes(for: workout),
-                  !routes.isEmpty else { continue }
+        // Fetch all routes in parallel — this is the main perf win vs serial fetching
+        let results: [(date: Date, walk: Walk?)] = try await withThrowingTaskGroup(
+            of: (Date, Walk?).self
+        ) { group in
+            for (index, workout) in workouts.enumerated() {
+                group.addTask {
+                    guard let routes = try? await self.fetchRoutes(for: workout),
+                          !routes.isEmpty else { return (workout.startDate, nil) }
 
-            let locations = routes.flatMap { $0 }
-            guard locations.count >= 2 else { continue }
+                    let locations = routes.flatMap { $0 }
+                    guard locations.count >= 2 else { return (workout.startDate, nil) }
 
-            let coordinates = locations.map(\.coordinate)
-            let (gain, loss) = elevationStats(from: locations)
+                    let coords = self.downsample(locations.map(\.coordinate))
+                    let (gain, loss) = self.elevationStats(from: locations)
 
-            let walk = Walk(
-                id: workout.uuid,
-                startDate: workout.startDate,
-                endDate: workout.endDate,
-                duration: workout.duration,
-                distance: workout.totalDistance?.doubleValue(for: .meter()) ?? 0,
-                coordinates: coordinates,
-                elevationGain: gain,
-                elevationLoss: loss
-            )
-            walks.append(walk)
+                    let walk = Walk(
+                        id: workout.uuid,
+                        startDate: workout.startDate,
+                        endDate: workout.endDate,
+                        duration: workout.duration,
+                        distance: workout.totalDistance?.doubleValue(for: .meter()) ?? 0,
+                        coordinates: coords,
+                        elevationGain: gain,
+                        elevationLoss: loss,
+                        colorIndex: index
+                    )
+                    return (workout.startDate, walk)
+                }
+            }
+
+            var collected: [(Date, Walk?)] = []
+            for try await pair in group {
+                collected.append(pair)
+            }
+            return collected
         }
 
-        return walks.sorted { $0.startDate > $1.startDate }
+        // Sort newest-first, then re-assign colorIndex by final position for consistent colors
+        let sorted = results
+            .compactMap(\.walk)
+            .sorted { $0.startDate > $1.startDate }
+            .enumerated()
+            .map { idx, walk in
+                Walk(
+                    id: walk.id,
+                    startDate: walk.startDate,
+                    endDate: walk.endDate,
+                    duration: walk.duration,
+                    distance: walk.distance,
+                    coordinates: walk.coordinates,
+                    elevationGain: walk.elevationGain,
+                    elevationLoss: walk.elevationLoss,
+                    colorIndex: idx
+                )
+            }
+
+        return sorted
+    }
+
+    // MARK: - Coordinate Downsampling
+
+    /// Keep every Nth point so each walk stays under maxPointsPerWalk.
+    /// Preserves first and last point exactly.
+    private func downsample(_ coords: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
+        guard coords.count > Self.maxPointsPerWalk else { return coords }
+        let step = coords.count / Self.maxPointsPerWalk
+        var result: [CLLocationCoordinate2D] = []
+        result.reserveCapacity(Self.maxPointsPerWalk + 1)
+        for i in stride(from: 0, to: coords.count - 1, by: step) {
+            result.append(coords[i])
+        }
+        result.append(coords[coords.count - 1])
+        return result
     }
 
     // MARK: - Private Helpers
@@ -109,14 +154,10 @@ final class HealthKitService {
     private func fetchRoutes(for workout: HKWorkout) async throws -> [[CLLocation]] {
         let routeSamples = try await fetchRouteSamples(for: workout)
         var allRoutes: [[CLLocation]] = []
-
         for routeSample in routeSamples {
             let locations = try await fetchLocations(for: routeSample)
-            if !locations.isEmpty {
-                allRoutes.append(locations)
-            }
+            if !locations.isEmpty { allRoutes.append(locations) }
         }
-
         return allRoutes
     }
 
@@ -154,9 +195,7 @@ final class HealthKitService {
                     }
                     return
                 }
-                if let batch {
-                    locations.append(contentsOf: batch)
-                }
+                if let batch { locations.append(contentsOf: batch) }
                 if done && !didFinish {
                     didFinish = true
                     continuation.resume(returning: locations)
@@ -171,25 +210,16 @@ final class HealthKitService {
         var loss: Double = 0
         for i in 1..<locations.count {
             let delta = locations[i].altitude - locations[i - 1].altitude
-            if delta > 0 {
-                gain += delta
-            } else {
-                loss += abs(delta)
-            }
+            if delta > 0 { gain += delta } else { loss += abs(delta) }
         }
         return (gain, loss)
     }
 }
 
-// MARK: - Errors
-
 enum HealthKitError: LocalizedError {
     case notAvailable
 
     var errorDescription: String? {
-        switch self {
-        case .notAvailable:
-            return "HealthKit is not available on this device."
-        }
+        "HealthKit is not available on this device."
     }
 }

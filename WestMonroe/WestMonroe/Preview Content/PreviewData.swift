@@ -13,7 +13,8 @@ enum PreviewData {
             distance: 5200,
             coordinates: centralParkLoop,
             elevationGain: 42,
-            elevationLoss: 38
+            elevationLoss: 38,
+            colorIndex: 0
         ),
         Walk(
             id: UUID(uuidString: "B2C3D4E5-F6A7-8901-BCDE-F12345678901")!,
@@ -23,7 +24,8 @@ enum PreviewData {
             distance: 3100,
             coordinates: brooklynBridgeWalk,
             elevationGain: 25,
-            elevationLoss: 22
+            elevationLoss: 22,
+            colorIndex: 1
         ),
         Walk(
             id: UUID(uuidString: "C3D4E5F6-A7B8-9012-CDEF-123456789012")!,
@@ -33,7 +35,8 @@ enum PreviewData {
             distance: 8700,
             coordinates: highLineWalk,
             elevationGain: 18,
-            elevationLoss: 20
+            elevationLoss: 20,
+            colorIndex: 2
         )
     ]
 

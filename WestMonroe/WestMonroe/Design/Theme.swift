@@ -17,6 +17,20 @@ enum WabiSabi {
     // MARK: - Route Color (white at 0.7 opacity)
     static let routeColor = Color.white.opacity(0.7)
 
+    // MARK: - Walk Route Palette (vibrant, dark-map-friendly)
+    static let walkPalette: [Color] = [
+        Color(hex: "#FF6B6B"),  // coral
+        Color(hex: "#4ECDC4"),  // teal
+        Color(hex: "#FFD93D"),  // amber
+        Color(hex: "#A78BFA"),  // lavender
+        Color(hex: "#6EE7B7"),  // mint
+        Color(hex: "#FB923C"),  // orange
+        Color(hex: "#60A5FA"),  // sky blue
+        Color(hex: "#F472B6"),  // pink
+        Color(hex: "#34D399"),  // emerald
+        Color(hex: "#FBBF24"),  // yellow
+    ]
+
     // MARK: - Spacing
     static let spacingXS: CGFloat = 4
     static let spacingSM: CGFloat = 8

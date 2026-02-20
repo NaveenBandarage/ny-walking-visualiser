@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import SwiftUI
 
 struct Walk: Identifiable, Hashable {
     let id: UUID
@@ -10,9 +11,11 @@ struct Walk: Identifiable, Hashable {
     let coordinates: [CLLocationCoordinate2D]
     let elevationGain: Double?
     let elevationLoss: Double?
+    let colorIndex: Int              // index into WabiSabi.walkPalette
 
     var distanceKm: Double { distance / 1000.0 }
     var durationMinutes: Double { duration / 60.0 }
+    var color: Color { WabiSabi.walkPalette[colorIndex % WabiSabi.walkPalette.count] }
 
     // Hashable conformance — CLLocationCoordinate2D isn't Hashable by default
     func hash(into hasher: inout Hasher) {
