@@ -6,39 +6,33 @@ import CoreLocation
 final class HealthKitService {
 
     enum AuthStatus {
-        case notDetermined
-        case authorized
-        case denied
+        case notDetermined  // Haven't asked yet
+        case authorized     // requestAuthorization has been called; data fetch will proceed
+        case unavailable    // Device doesn't support HealthKit
     }
 
     private let store = HKHealthStore()
+    private static let hasRequestedKey = "hk_has_requested_auth"
 
     private(set) var authStatus: AuthStatus = .notDetermined
 
     // MARK: - Authorization
 
+    /// Sets initial state based purely on whether we've ever called requestAuthorization before.
+    /// NOTE: authorizationStatus(for:) only reflects *write* permission, so we never use it
+    /// to gate read-only access — HealthKit intentionally hides read auth status from apps.
     func checkAuthStatus() {
         guard HKHealthStore.isHealthDataAvailable() else {
-            authStatus = .denied
+            authStatus = .unavailable
             return
         }
-        let workoutType = HKWorkoutType.workoutType()
-        let status = store.authorizationStatus(for: workoutType)
-        switch status {
-        case .notDetermined:
-            authStatus = .notDetermined
-        case .sharingAuthorized:
-            authStatus = .authorized
-        case .sharingDenied:
-            authStatus = .denied
-        @unknown default:
-            authStatus = .notDetermined
-        }
+        let hasRequested = UserDefaults.standard.bool(forKey: Self.hasRequestedKey)
+        authStatus = hasRequested ? .authorized : .notDetermined
     }
 
     func requestAuthorization() async throws {
         guard HKHealthStore.isHealthDataAvailable() else {
-            authStatus = .denied
+            authStatus = .unavailable
             throw HealthKitError.notAvailable
         }
 
@@ -48,10 +42,12 @@ final class HealthKitService {
             HKQuantityType(.distanceWalkingRunning)
         ]
 
+        // This shows the system permission sheet exactly once; subsequent calls are no-ops.
         try await store.requestAuthorization(toShare: [], read: typesToRead)
 
-        let status = store.authorizationStatus(for: HKWorkoutType.workoutType())
-        authStatus = status == .sharingAuthorized ? .authorized : .denied
+        // Mark that we've requested so we skip the prompt on next launch.
+        UserDefaults.standard.set(true, forKey: Self.hasRequestedKey)
+        authStatus = .authorized
     }
 
     // MARK: - Walk Queries
@@ -189,14 +185,11 @@ final class HealthKitService {
 
 enum HealthKitError: LocalizedError {
     case notAvailable
-    case authorizationDenied
 
     var errorDescription: String? {
         switch self {
         case .notAvailable:
             return "HealthKit is not available on this device."
-        case .authorizationDenied:
-            return "Access to Health data was denied."
         }
     }
 }

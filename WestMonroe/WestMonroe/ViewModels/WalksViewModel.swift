@@ -33,9 +33,9 @@ final class WalksViewModel {
         Task {
             do {
                 try await healthKit.requestAuthorization()
-                if healthKit.authStatus == .authorized {
-                    await loadWalks()
-                }
+                // Always attempt to load after requesting — HealthKit returns
+                // empty results silently if the user denied read access.
+                await loadWalks()
             } catch {
                 self.error = error.localizedDescription
             }

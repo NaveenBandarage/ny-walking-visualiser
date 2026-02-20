@@ -8,12 +8,9 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch viewModel.authStatus {
-            case .notDetermined, .denied:
-                PermissionView(
-                    authStatus: viewModel.authStatus,
-                    onRequestAccess: { viewModel.requestAuthorization() }
-                )
-            case .authorized:
+            case .notDetermined:
+                PermissionView(onRequestAccess: { viewModel.requestAuthorization() })
+            case .authorized, .unavailable:
                 authorizedContent
             }
         }
