@@ -16,8 +16,9 @@ final class HealthKitService {
 
     /// 150 pts/walk is invisible from default city zoom and keeps MapKit well within limits.
     private static let maxPointsPerWalk = 150
-    /// Maximum walks to load — caps total vertex count at ~22k.
-    private static let maxWalks = 150
+    /// Cap on walks that actually have routes (applied after fetching). Fetching all
+    /// workout IDs is cheap; routes are only fetched until this limit is reached.
+    private static let maxRenderedWalks = 200
     /// Concurrent route fetches — avoids a memory spike from loading everything at once.
     private static let fetchConcurrency = 10
 
@@ -56,11 +57,15 @@ final class HealthKitService {
     func fetchWalks() async throws -> [Walk] {
         let workouts = try await fetchWalkingWorkouts()
 
-        // Process in batches to keep peak memory low
+        // Process in batches of 10 to keep peak memory flat.
+        // Stop once we have enough walks with routes — skipping workouts without
+        // routes without penalising the cap.
         var allWalks: [Walk] = []
 
         let batches = workouts.chunked(into: Self.fetchConcurrency)
         for batch in batches {
+            guard allWalks.count < Self.maxRenderedWalks else { break }
+
             let batchWalks = try await withThrowingTaskGroup(of: Walk?.self) { group in
                 for workout in batch {
                     group.addTask {
@@ -132,7 +137,7 @@ final class HealthKitService {
             let query = HKSampleQuery(
                 sampleType: HKWorkoutType.workoutType(),
                 predicate: predicate,
-                limit: Self.maxWalks,
+                limit: HKObjectQueryNoLimit,
                 sortDescriptors: [sortDescriptor]
             ) { _, samples, error in
                 if let error { continuation.resume(throwing: error); return }
